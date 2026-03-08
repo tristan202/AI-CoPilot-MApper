@@ -27,6 +27,11 @@ Global Txt_AboutTitle.s, Txt_AboutText.s
 
 ; Menu IDs
 Enumeration
+  #AboutWin
+  #About_ImageGadget
+  #About_LinkGadget
+  #About_TextGadget
+  #About_CloseBtn
   #MainWin
   #TrayMenu
   #TrayIcon
@@ -426,7 +431,34 @@ If OpenWindow(#MainWin, 0, 0, 0, 0, "AICopilotMapper", #PB_Window_Invisible)
               SysTrayIconToolTip(#TrayIcon, Txt_TrayTooltip) 
               
             Case #Menu_About
-              MessageRequester(Txt_AboutTitle, Txt_AboutText, #PB_MessageRequester_Info)
+              If OpenWindow(#AboutWin, 0, 0, 300, 220, Txt_AboutTitle, #PB_Window_SystemMenu | #PB_Window_ScreenCentered)
+                StickyWindow(#AboutWin, #True)
+                ImageGadget(#About_ImageGadget, 126, 20, 48, 48, ImageID(#AppIcon))    
+                TextGadget(#About_TextGadget, 10, 80, 280, 60, Txt_AboutText, #PB_Text_Center)
+                HyperLinkGadget(#About_LinkGadget, 90, 145, 280, 20, "Visit GitHub Repository", RGB(0, 0, 255), #PB_HyperLink_Underline)
+                SetGadgetColor(#About_LinkGadget, #PB_Gadget_FrontColor, RGB(0, 102, 204))
+                ButtonGadget(#About_CloseBtn, 110, 180, 80, 25, "OK")    
+                Repeat
+                  Define AboutEvent = WaitWindowEvent()
+                  Select AboutEvent
+                    Case #PB_Event_Gadget
+                      Select EventGadget()
+                        Case #About_LinkGadget
+                          RunProgram("https://github.com/tristan202/AI-Copilot-Mapper")
+              
+                        Case #About_CloseBtn
+                          CloseWindow(#AboutWin)
+                          Break
+                      EndSelect
+          
+                    Case #PB_Event_CloseWindow
+                      If EventWindow() = #AboutWin
+                        CloseWindow(#AboutWin)
+                        Break
+                      EndIf
+                  EndSelect
+                ForEver
+              EndIf
               
             Case #Menu_Exit
               Break
@@ -449,12 +481,14 @@ DataSection
 EndDataSection
 ; IDE Options = PureBasic 6.21 (Windows - x64)
 ; CursorPosition = 438
-; FirstLine = 401
+; FirstLine = 424
 ; Folding = --
+; Optimizer
 ; EnableXP
 ; DPIAware
 ; UseIcon = aicopilotmapper.ico
-; Executable = ..\aicopilotmapper.exe
+; Executable = ..\AICopilotMapper.exe
+; DisableDebugger
 ; IncludeVersionInfo
 ; VersionField0 = 1.0.0.0
 ; VersionField1 = 1.0.0.0
