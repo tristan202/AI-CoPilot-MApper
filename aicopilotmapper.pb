@@ -1,7 +1,7 @@
 ﻿EnableExplicit
 
 ; --- CONSTANTS ---
-#AppVersion = "1.1.0" ; Update version number here
+#AppVersion = "1.0.1" ; Update version number here
 
 ; Browser structure
 Structure BrowserInfo
@@ -447,8 +447,7 @@ DataSection
   AppIconEnd:
 EndDataSection
 ; IDE Options = PureBasic 6.30 (Windows - x64)
-; CursorPosition = 447
-; FirstLine = 400
+; CursorPosition = 3
 ; Folding = --
 ; EnableXP
 ; DPIAware
