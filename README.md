@@ -8,6 +8,7 @@ The program runs discreetly in the background via the system tray, giving you fu
 * **Choose your favorite AI:** Supports Google Gemini, OpenAI ChatGPT, Anthropic Claude, DeepSeek, Perplexity AI, and Microsoft Copilot.
 * **Dynamic browser selection:** Automatically detects the browsers installed on your PC so you can pick your preferred one.
 * **Multilingual:** Built-in support for 6 languages (English, Danish, Spanish, French, Italian, and German).
+* **Dynamic Languages:** Will now pick up new language files automatically. Add your own translation.
 * **Auto-start:** Can easily be configured to start automatically with Windows.
 * **Memory:** Saves your preferences locally in an `.ini` file.
 
