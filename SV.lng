@@ -1,0 +1,14 @@
+[Language]
+LanguageName = Svenska
+MenuMode = Knappfunktion
+ModeAI = AI Genväg
+ModeCTRL = Höger CTRL
+ModeALT = Höger ALT
+MenuAI = Välj AI
+MenuBrowser = Välj Webbläsare
+MenuAutoStart = Starta med Windows
+MenuLanguage = Språk
+MenuExit = Avsluta
+MenuAbout = Om programmet
+AboutTitle = Om AI Copilot Mapper
+AboutText = Utvecklad för att mappa om Copilot-knappen till din favorit-AI eller en systemknapp.
