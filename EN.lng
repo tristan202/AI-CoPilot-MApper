@@ -1,0 +1,14 @@
+[Language]
+LanguageName = English
+MenuMode = Button Function
+ModeAI = AI Shortcut
+ModeCTRL = Right CTRL
+ModeALT = Right ALT
+MenuAI = Select AI
+MenuBrowser = Select Browser
+MenuAutoStart = Start with Windows
+MenuLanguage = Language
+MenuExit = Exit
+MenuAbout = About
+AboutTitle = About AI Copilot Mapper
+AboutText = Developed to remap the Copilot key to your favorite AI or a system key.

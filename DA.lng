@@ -1,0 +1,14 @@
+[Language]
+LanguageName = Dansk
+MenuMode = Knap Funktion
+ModeAI = AI Genvej
+ModeCTRL = Højre CTRL
+ModeALT = Højre ALT
+MenuAI = Vælg AI
+MenuBrowser = Vælg Browser
+MenuAutoStart = Start med Windows
+MenuLanguage = Sprog
+MenuExit = Afslut
+MenuAbout = Om programmet
+AboutTitle = Om AI Copilot Mapper
+AboutText = Udviklet til at omkode Copilot-tasten til din foretrukne AI eller en systemtast.

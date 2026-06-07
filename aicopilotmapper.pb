@@ -1,7 +1,7 @@
 ﻿EnableExplicit
 
 ; --- CONSTANTS ---
-#AppVersion = "1.0.1" ; Update version number here
+#AppVersion = "1.1.0"
 
 ; Browser structure
 Structure BrowserInfo
@@ -9,8 +9,15 @@ Structure BrowserInfo
   Path.s
 EndStructure
 
-; Global list of installed browsers
+; Language structure for dynamic menus
+Structure LangInfo
+  Code.s ; E.g., "DA", "EN", "DE"
+  Name.s ; E.g., "Dansk", "English"
+EndStructure
+
+; Global lists
 Global NewList InstalledBrowsers.BrowserInfo()
+Global NewList AvailableLanguages.LangInfo()
 
 ; Settings & Files
 Global IniFile.s = GetPathPart(ProgramFilename()) + "AICopilotMapper.ini"
@@ -23,7 +30,7 @@ Global Language.s = "DA"
 Global ButtonMode.i = 0 ; 0 = AI Mode, 1 = R-CTRL Mode, 2 = R-ALT Mode
 Global hMutex, hHook
 
-; String Variables for UI
+; String Variables for UI (Loaded via .lng file or fallback)
 Global Txt_MsgBoxTitle.s, Txt_MsgBoxRunning.s
 Global Txt_TrayTooltip.s, Txt_MenuBrowser.s, Txt_MenuAI.s
 Global Txt_MenuAutoStart.s, Txt_MenuLanguage.s, Txt_MenuAbout.s, Txt_MenuExit.s
@@ -51,18 +58,32 @@ Enumeration
   #Menu_Mode_CTRL
   #Menu_Mode_ALT
   #Menu_AutoStart
-  #Menu_Lang_DA
-  #Menu_Lang_EN
-  #Menu_Lang_ES
-  #Menu_Lang_FR
-  #Menu_Lang_IT
-  #Menu_Lang_DE
   #Menu_About
   #Menu_Exit
   #Menu_Browser_Base = 100 
+  #Menu_Lang_Base    = 200 ; Dynamic language items start here
 EndEnumeration
 
-; --- HELPER FUNCTIONS ---
+; --- 1. INSTANCE CHECK (MUTEX) ---
+; Placeret helt i toppen for at afvise ekstra instanser øjeblikkeligt.
+Global MutexName.s = "Global\AICopilotMapper_Unique_ID"
+hMutex = CreateMutex_(0, 1, @MutexName)
+If GetLastError_() = 183 : End : EndIf
+
+
+; --- 2. HELPER FUNCTIONS ---
+
+; Modern replacement for keybd_event_ using SendInput_
+Procedure SendKeyInput(VKey.w, Flags.l)
+  Protected Input.INPUT
+  Input\type = #INPUT_KEYBOARD
+  Input\ki\wVk = VKey
+  Input\ki\wScan = 0
+  Input\ki\dwFlags = Flags
+  Input\ki\time = 0
+  Input\ki\dwExtraInfo = 0
+  SendInput_(1, @Input, SizeOf(INPUT))
+EndProcedure
 
 ; Reads a string from the Windows Registry
 Procedure.s ReadRegString(hKeyRoot, KeyPath.s, ValueName.s)
@@ -111,10 +132,46 @@ Procedure GetInstalledBrowsers()
     ForEver
     RegCloseKey_(hKey)
   EndIf
+  
+  ; Fallback hvis listen er tom
   If ListSize(InstalledBrowsers()) = 0
     AddElement(InstalledBrowsers())
     InstalledBrowsers()\Name = "System Default"
     InstalledBrowsers()\Path = "explorer.exe" 
+  EndIf
+EndProcedure
+
+; Scans the application directory for .lng files dynamically
+Procedure GetAvailableLanguages()
+  Protected Directory.s = GetPathPart(ProgramFilename())
+  Protected DirID.i, FileName.s, LangCode.s
+  
+  ClearList(AvailableLanguages())
+  
+  DirID = ExamineDirectory(#PB_Any, Directory, "*.lng")
+  If DirID
+    While NextDirectoryEntry(DirID)
+      If DirectoryEntryType(DirID) = #PB_DirectoryEntry_File
+        FileName = DirectoryEntryName(DirID)
+        LangCode = UCase(Left(FileName, Len(FileName) - 4)) ; Remove ".lng"
+        
+        If OpenPreferences(Directory + FileName, #PB_UTF8)
+          PreferenceGroup("Language")
+          AddElement(AvailableLanguages())
+          AvailableLanguages()\Code = LangCode
+          AvailableLanguages()\Name = ReadPreferenceString("LanguageName", LangCode)
+          ClosePreferences()
+        EndIf
+      EndIf
+    Wend
+    FinishDirectory(DirID)
+  EndIf
+  
+  ; Fallback if no language files are found on disk
+  If ListSize(AvailableLanguages()) = 0
+    AddElement(AvailableLanguages())
+    AvailableLanguages()\Code = "DA"
+    AvailableLanguages()\Name = "Dansk"
   EndIf
 EndProcedure
 
@@ -130,49 +187,39 @@ Procedure UpdateTargetURL()
   EndSelect
 EndProcedure
 
-; Sets the UI strings based on the selected language
+; Dynamic Language Loader (.lng files) with hardcoded Danish fallback
 Procedure UpdateLanguageStrings()
   Protected AppName.s = "AI Copilot Mapper"
   Protected VerPrefix.s = " v" + #AppVersion + Chr(10)
+  Protected LngFile.s = GetPathPart(ProgramFilename()) + Language + ".lng"
   
-  Select Language
-    Case "EN"
-      Txt_MenuMode = "Button Function" : Txt_ModeAI = "AI Shortcut" : Txt_ModeCTRL = "Right CTRL" : Txt_ModeALT = "Right ALT"
-      Txt_MenuAI = "Select AI" : Txt_MenuBrowser = "Select Browser" : Txt_MenuAutoStart = "Start with Windows"
-      Txt_MenuLanguage = "Language" : Txt_MenuExit = "Exit" : Txt_MenuAbout = "About"
-      Txt_AboutTitle = "About " + AppName
-      Txt_AboutText = AppName + VerPrefix + "Developed to remap the Copilot key to your favorite AI or a system key."
-    Case "ES"
-      Txt_MenuMode = "Función del botón" : Txt_ModeAI = "Acceso directo IA" : Txt_ModeCTRL = "CTRL derecho" : Txt_ModeALT = "ALT derecho"
-      Txt_MenuAI = "Seleccionar IA" : Txt_MenuBrowser = "Seleccionar navegador" : Txt_MenuAutoStart = "Iniciar con Windows"
-      Txt_MenuLanguage = "Idioma" : Txt_MenuExit = "Salir" : Txt_MenuAbout = "Acerca de"
-      Txt_AboutTitle = "Acerca de " + AppName
-      Txt_AboutText = AppName + VerPrefix + "Desarrollado para reasignar la tecla Copilot a tu IA favorita o a una tecla del sistema."
-    Case "FR"
-      Txt_MenuMode = "Fonction du bouton" : Txt_ModeAI = "Raccourci IA" : Txt_ModeCTRL = "CTRL droit" : Txt_ModeALT = "ALT droit"
-      Txt_MenuAI = "Sélectionner l'IA" : Txt_MenuBrowser = "Sélectionner le navigateur" : Txt_MenuAutoStart = "Démarrer avec Windows"
-      Txt_MenuLanguage = "Langue" : Txt_MenuExit = "Quitter" : Txt_MenuAbout = "À propos"
-      Txt_AboutTitle = "À propos de " + AppName
-      Txt_AboutText = AppName + VerPrefix + "Développé pour remapper la touche Copilot vers votre IA préférée ou une touche système."
-    Case "IT"
-      Txt_MenuMode = "Funzione pulsante" : Txt_ModeAI = "Scorciatoia IA" : Txt_ModeCTRL = "CTRL destro" : Txt_ModeALT = "ALT destro"
-      Txt_MenuAI = "Seleziona IA" : Txt_MenuBrowser = "Seleziona browser" : Txt_MenuAutoStart = "Avvia con Windows"
-      Txt_MenuLanguage = "Lingua" : Txt_MenuExit = "Esci" : Txt_MenuAbout = "Informazioni"
-      Txt_AboutTitle = "Informazioni su " + AppName
-      Txt_AboutText = AppName + VerPrefix + "Sviluppato per rimappare il tasto Copilot sulla tua IA preferita o su un tasto di sistema."
-    Case "DE"
-      Txt_MenuMode = "Tastenfunktion" : Txt_ModeAI = "KI-Verknüpfung" : Txt_ModeCTRL = "Rechtes CTRL" : Txt_ModeALT = "Rechtes ALT"
-      Txt_MenuAI = "KI auswählen" : Txt_MenuBrowser = "Browser auswählen" : Txt_MenuAutoStart = "Mit Windows starten"
-      Txt_MenuLanguage = "Sprache" : Txt_MenuExit = "Beenden" : Txt_MenuAbout = "Über"
-      Txt_AboutTitle = "Über " + AppName
-      Txt_AboutText = AppName + VerPrefix + "Entwickelt, um die Copilot-Taste Ihrer Lieblings-KI oder einer Systemtaste neu zuzuweisen."
-    Default ; DA
-      Txt_MenuMode = "Knap Funktion" : Txt_ModeAI = "AI Genvej" : Txt_ModeCTRL = "Højre CTRL" : Txt_ModeALT = "Højre ALT"
-      Txt_MenuAI = "Vælg AI" : Txt_MenuBrowser = "Vælg Browser" : Txt_MenuAutoStart = "Start med Windows"
-      Txt_MenuLanguage = "Sprog" : Txt_MenuExit = "Afslut" : Txt_MenuAbout = "Om programmet"
-      Txt_AboutTitle = "Om " + AppName
-      Txt_AboutText = AppName + VerPrefix + "Udviklet til at omkode Copilot-tasten til din foretrukne AI eller en systemtast."
-  EndSelect
+  ; Sæt hårdkodede standardværdier (Dansk fallback) først
+  Txt_MenuMode = "Knap Funktion" : Txt_ModeAI = "AI Genvej" : Txt_ModeCTRL = "Højre CTRL" : Txt_ModeALT = "Højre ALT"
+  Txt_MenuAI = "Vælg AI" : Txt_MenuBrowser = "Vælg Browser" : Txt_MenuAutoStart = "Start med Windows"
+  Txt_MenuLanguage = "Sprog" : Txt_MenuExit = "Afslut" : Txt_MenuAbout = "Om programmet"
+  Txt_AboutTitle = "Om " + AppName
+  Txt_AboutText = AppName + VerPrefix + "Udviklet til at omkode Copilot-tasten til din foretrukne AI eller en systemtast."
+  
+  ; Forsøg at indlæse fra ekstern .lng fil, hvis den eksisterer
+  If FileSize(LngFile) > 0
+    If OpenPreferences(LngFile, #PB_UTF8)
+      PreferenceGroup("Language")
+      Txt_MenuMode = ReadPreferenceString("MenuMode", Txt_MenuMode)
+      Txt_ModeAI = ReadPreferenceString("ModeAI", Txt_ModeAI)
+      Txt_ModeCTRL = ReadPreferenceString("ModeCTRL", Txt_ModeCTRL)
+      Txt_ModeALT = ReadPreferenceString("ModeALT", Txt_ModeALT)
+      Txt_MenuAI = ReadPreferenceString("MenuAI", Txt_MenuAI)
+      Txt_MenuBrowser = ReadPreferenceString("MenuBrowser", Txt_MenuBrowser)
+      Txt_MenuAutoStart = ReadPreferenceString("MenuAutoStart", Txt_MenuAutoStart)
+      Txt_MenuLanguage = ReadPreferenceString("MenuLanguage", Txt_MenuLanguage)
+      Txt_MenuExit = ReadPreferenceString("MenuExit", Txt_MenuExit)
+      Txt_MenuAbout = ReadPreferenceString("MenuAbout", Txt_MenuAbout)
+      Txt_AboutTitle = ReadPreferenceString("AboutTitle", Txt_AboutTitle)
+      Txt_AboutText = AppName + VerPrefix + ReadPreferenceString("AboutText", "Developed to remap the Copilot key.")
+      ClosePreferences()
+    EndIf
+  EndIf
+  
   Txt_MsgBoxTitle = AppName
   Txt_TrayTooltip = AppName
 EndProcedure
@@ -213,14 +260,16 @@ Procedure RebuildMenu()
     MenuBar()
     MenuItem(#Menu_AutoStart, Txt_MenuAutoStart)
     
-    ; Language Submenu
+    ; Dynamic Language Submenu
     OpenSubMenu(Txt_MenuLanguage)
-      MenuItem(#Menu_Lang_DA, "Dansk")
-      MenuItem(#Menu_Lang_EN, "English")
-      MenuItem(#Menu_Lang_ES, "Español")
-      MenuItem(#Menu_Lang_FR, "Français")
-      MenuItem(#Menu_Lang_IT, "Italiano")
-      MenuItem(#Menu_Lang_DE, "Deutsch")
+      Index = 0
+      ForEach AvailableLanguages()
+        MenuItem(#Menu_Lang_Base + Index, AvailableLanguages()\Name)
+        If UCase(Language) = UCase(AvailableLanguages()\Code)
+          SetMenuItemState(#TrayMenu, #Menu_Lang_Base + Index, 1)
+        EndIf
+        Index + 1
+      Next
     CloseSubMenu()
     
     MenuBar()
@@ -232,15 +281,6 @@ Procedure RebuildMenu()
     SetMenuItemState(#TrayMenu, #Menu_Mode_CTRL, Bool(ButtonMode = 1))
     SetMenuItemState(#TrayMenu, #Menu_Mode_ALT, Bool(ButtonMode = 2))
     SetMenuItemState(#TrayMenu, #Menu_AutoStart, AutoStart)
-    
-    Select Language
-      Case "EN": SetMenuItemState(#TrayMenu, #Menu_Lang_EN, 1)
-      Case "ES": SetMenuItemState(#TrayMenu, #Menu_Lang_ES, 1)
-      Case "FR": SetMenuItemState(#TrayMenu, #Menu_Lang_FR, 1)
-      Case "IT": SetMenuItemState(#TrayMenu, #Menu_Lang_IT, 1)
-      Case "DE": SetMenuItemState(#TrayMenu, #Menu_Lang_DE, 1)
-      Default:   SetMenuItemState(#TrayMenu, #Menu_Lang_DA, 1)
-    EndSelect
     
     Select SelectedAI
       Case "ChatGPT"    : SetMenuItemState(#TrayMenu, #Menu_AI_ChatGPT, 1)
@@ -259,9 +299,6 @@ Procedure SetAutoStartRegistry(Enable.i)
   Protected ValueName.s = "AICopilotMapper"
   Protected Path.s = Chr(34) + ProgramFilename() + Chr(34)
   Protected DataSize.i = StringByteLength(Path) + SizeOf(Character)
-  
-  ; #KEY_SET_VALUE ($0002) beder kun om lov til at skrive/slette en værdi. 
-  ; Dette undgår oftest at trigge Antivirus og Windows' sikkerhedsblokeringer.
   Protected AccessMask.i = $0002 
   
   Result = RegOpenKeyEx_(#HKEY_CURRENT_USER, KeyPath, 0, AccessMask, @hKey)
@@ -269,21 +306,18 @@ Procedure SetAutoStartRegistry(Enable.i)
   If Result = #ERROR_SUCCESS
     If Enable
       Result = RegSetValueEx_(hKey, ValueName, 0, #REG_SZ, @Path, DataSize)
-      Debug "RegSetValueEx (Skriv) resultat: " + Str(Result)
     Else
       Result = RegDeleteValue_(hKey, ValueName)
-      Debug "RegDeleteValue (Slet) resultat: " + Str(Result)
     EndIf
     RegCloseKey_(hKey)
   Else
-    ; Hvis Windows STADIG blokerer, får vi nu at vide hvorfor!
     MessageRequester("Rettighedsfejl", "Windows nægtede adgang til Autostart." + Chr(10) + "Fejlkode: " + Str(Result), #PB_MessageRequester_Warning)
   EndIf
 EndProcedure
 
 ; Saves user settings to INI file
 Procedure SaveSettings()
-  If OpenPreferences(IniFile) Or CreatePreferences(IniFile)
+  If OpenPreferences(IniFile, #PB_UTF8) Or CreatePreferences(IniFile, #PB_UTF8)
     PreferenceGroup("Settings")
     WritePreferenceString("Browser", BrowserPath)
     WritePreferenceInteger("AutoStart", AutoStart)
@@ -296,7 +330,7 @@ EndProcedure
 
 ; Loads user settings from INI file
 Procedure LoadSettings()
-  If OpenPreferences(IniFile)
+  If OpenPreferences(IniFile, #PB_UTF8)
     PreferenceGroup("Settings")
     BrowserPath = ReadPreferenceString("Browser", "")
     AutoStart = ReadPreferenceInteger("AutoStart", 0)
@@ -305,26 +339,28 @@ Procedure LoadSettings()
     ButtonMode = ReadPreferenceInteger("ButtonMode", 0)
     ClosePreferences()
   EndIf
+  
+  ; Sikkerheds-fallback hvis BrowserPath er tom eller ugyldig
   If BrowserPath = ""
     If FirstElement(InstalledBrowsers())
       BrowserPath = InstalledBrowsers()\Path
+    Else
+      BrowserPath = "explorer.exe"
     EndIf
   EndIf
   UpdateTargetURL() 
 EndProcedure
 
-; --- KEYBOARD HOOK LOGIC ---
+
+; --- 3. KEYBOARD HOOK LOGIC (With SendInput API) ---
 
 Procedure.l KeyboardProc(nCode, wParam, lParam)
   Protected *pkbdll.KBDLLHOOKSTRUCT = lParam
   
-  ; Must pass the hook to next app if nCode is < 0
   If nCode < 0
     ProcedureReturn CallNextHookEx_(hHook, nCode, wParam, lParam)
   EndIf
 
-  ; Avoid infinite recursion by ignoring injected keys (software generated)
-  ; LLMHF_INJECTED = $10
   If *pkbdll\flags & $10
     ProcedureReturn CallNextHookEx_(hHook, nCode, wParam, lParam)
   EndIf
@@ -333,60 +369,54 @@ Procedure.l KeyboardProc(nCode, wParam, lParam)
     Select ButtonMode
       Case 0 ; --- AI Shortcut Mode ---
         If wParam = #WM_KEYDOWN
-          RunProgram(BrowserPath, "--app=" + TargetURL, "")
+          If BrowserPath = "explorer.exe"
+            RunProgram(TargetURL, "", "")
+          Else
+            RunProgram(BrowserPath, "--app=" + TargetURL, "")
+          EndIf
         EndIf
         
-      Case 1, 2 ; --- Modifier Remapping Mode ---
-        Protected VKey.i
+      Case 1, 2 ; --- Modifier Remapping Mode (SendInput) ---
+        Protected VKey.w
         If ButtonMode = 1 : VKey = #VK_RCONTROL : Else : VKey = #VK_RMENU : EndIf
         
         If wParam = #WM_KEYDOWN Or wParam = #WM_SYSKEYDOWN
-          ; Neutralize ghost keys (Win+Shift) often sent by Copilot hardware
-          ; We only neutralize if they are currently pressed to prevent system instability (BSOD protection)
           If GetAsyncKeyState_(#VK_LSHIFT) & $8000
-            keybd_event_(#VK_LSHIFT, 0, #KEYEVENTF_KEYUP, 0)
+            SendKeyInput(#VK_LSHIFT, #KEYEVENTF_KEYUP)
           EndIf
           If GetAsyncKeyState_(#VK_LWIN) & $8000
-            keybd_event_(#VK_LWIN, 0, #KEYEVENTF_KEYUP, 0)
+            SendKeyInput(#VK_LWIN, #KEYEVENTF_KEYUP)
           EndIf
           
-          ; Send the desired remapped key
-          keybd_event_(VKey, 0, 0, 0)
+          SendKeyInput(VKey, 0)
           
         ElseIf wParam = #WM_KEYUP Or wParam = #WM_SYSKEYUP
-          ; Release the remapped key
-          keybd_event_(VKey, 0, #KEYEVENTF_KEYUP, 0)
+          SendKeyInput(VKey, #KEYEVENTF_KEYUP)
         EndIf
     EndSelect
     
-    ProcedureReturn 1 ; Block the original F23 event from reaching Windows
+    ProcedureReturn 1
   EndIf
 
-  ; Let all other keys pass through
   ProcedureReturn CallNextHookEx_(hHook, nCode, wParam, lParam)
 EndProcedure
 
-; --- MAIN PROGRAM START ---
 
+; --- 4. APPLICATION INITIALIZATION ---
+
+GetAvailableLanguages() ; Scans for languages first
 GetInstalledBrowsers()
 LoadSettings()
 UpdateLanguageStrings()
 
-; Use a Mutex to prevent multiple instances of the application
-Global MutexName.s = "Global\AICopilotMapper_Unique_ID"
-hMutex = CreateMutex_(0, 1, @MutexName)
-If GetLastError_() = 183 : End : EndIf
-
 ; Hidden window to handle background events and tray menu
 If OpenWindow(#MainWin, 0, 0, 0, 0, "AICopilotMapper", #PB_Window_Invisible)
   
-  ; Load app icon from DataSection
   CatchImage(#AppIcon, ?AppIconStart, ?AppIconEnd - ?AppIconStart)
   AddSysTrayIcon(#TrayIcon, WindowID(#MainWin), ImageID(#AppIcon))
   SysTrayIconToolTip(#TrayIcon, Txt_TrayTooltip)
   RebuildMenu()
   
-  ; Install the Low-Level Keyboard Hook
   hHook = SetWindowsHookEx_(13, @KeyboardProc(), GetModuleHandle_(0), 0)
   
   ; Main Event Loop
@@ -401,38 +431,33 @@ If OpenWindow(#MainWin, 0, 0, 0, 0, "AICopilotMapper", #PB_Window_Invisible)
       Case #PB_Event_Menu
         Define MenuID.i = EventMenu()
         
-        ; Handle browser selection
+        ; Handle dynamic browser clicks
         If MenuID >= #Menu_Browser_Base And MenuID < #Menu_Browser_Base + ListSize(InstalledBrowsers())
           SelectElement(InstalledBrowsers(), MenuID - #Menu_Browser_Base)
           BrowserPath = InstalledBrowsers()\Path : SaveSettings() : RebuildMenu()
+          
+        ; Handle dynamic language clicks
+        ElseIf MenuID >= #Menu_Lang_Base And MenuID < #Menu_Lang_Base + ListSize(AvailableLanguages())
+          SelectElement(AvailableLanguages(), MenuID - #Menu_Lang_Base)
+          Language = AvailableLanguages()\Code
+          UpdateLanguageStrings() : SaveSettings() : RebuildMenu()
+          
         Else
-          ; Handle static menu items
           Select MenuID
-            Case #Menu_Mode_AI : ButtonMode = 0 : SaveSettings() : RebuildMenu()
-            Case #Menu_Mode_CTRL : ButtonMode = 1 : SaveSettings() : RebuildMenu()
-            Case #Menu_Mode_ALT : ButtonMode = 2 : SaveSettings() : RebuildMenu()
+            Case #Menu_Mode_AI    : ButtonMode = 0 : SaveSettings() : RebuildMenu()
+            Case #Menu_Mode_CTRL  : ButtonMode = 1 : SaveSettings() : RebuildMenu()
+            Case #Menu_Mode_ALT   : ButtonMode = 2 : SaveSettings() : RebuildMenu()
             
             Case #Menu_AI_Gemini To #Menu_AI_Copilot
               Select MenuID
-                Case #Menu_AI_Gemini : SelectedAI = "Gemini"
-                Case #Menu_AI_ChatGPT : SelectedAI = "ChatGPT"
-                Case #Menu_AI_Claude : SelectedAI = "Claude"
-                Case #Menu_AI_DeepSeek : SelectedAI = "DeepSeek"
+                Case #Menu_AI_Gemini     : SelectedAI = "Gemini"
+                Case #Menu_AI_ChatGPT    : SelectedAI = "ChatGPT"
+                Case #Menu_AI_Claude     : SelectedAI = "Claude"
+                Case #Menu_AI_DeepSeek   : SelectedAI = "DeepSeek"
                 Case #Menu_AI_Perplexity : SelectedAI = "Perplexity"
-                Case #Menu_AI_Copilot : SelectedAI = "Copilot"
+                Case #Menu_AI_Copilot    : SelectedAI = "Copilot"
               EndSelect
               UpdateTargetURL() : SaveSettings() : RebuildMenu()
-
-            Case #Menu_Lang_DA To #Menu_Lang_DE
-              Select MenuID
-                Case #Menu_Lang_DA : Language = "DA"
-                Case #Menu_Lang_EN : Language = "EN"
-                Case #Menu_Lang_ES : Language = "ES"
-                Case #Menu_Lang_FR : Language = "FR"
-                Case #Menu_Lang_IT : Language = "IT"
-                Case #Menu_Lang_DE : Language = "DE"
-              EndSelect
-              UpdateLanguageStrings() : SaveSettings() : RebuildMenu()
 
             Case #Menu_AutoStart
               AutoStart = 1 - AutoStart
@@ -462,23 +487,9 @@ DataSection
   AppIconEnd:
 EndDataSection
 ; IDE Options = PureBasic 6.30 (Windows - x64)
-; CursorPosition = 275
-; FirstLine = 248
+; CursorPosition = 3
 ; Folding = --
 ; EnableXP
 ; DPIAware
 ; UseIcon = aicopilotmapper.ico
-; Executable = ..\AICopilotMapper.exe
-; Compiler = PureBasic 6.30 (Windows - x64)
-; IncludeVersionInfo
-; VersionField0 = 1.0.0.0
-; VersionField1 = 1.0.0.0
-; VersionField2 = tristan202
-; VersionField3 = AI CoPilot Mapper
-; VersionField4 = 1.0.0
-; VersionField5 = 1.0.0
-; VersionField6 = Maps CoPilot key to any AI
-; VersionField7 = aicopilotmapper
-; VersionField8 = aicopilotmapper.exe
-; VersionField13 = tristan202@gmail.com
-; VersionField17 = 0800 System Default Language
+; Executable = AICopilotMapper.exe

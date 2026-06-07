@@ -1,0 +1,14 @@
+[Language]
+LanguageName = Español
+MenuMode = Función del botón
+ModeAI = Acceso directo IA
+ModeCTRL = CTRL derecho
+ModeALT = ALT derecho
+MenuAI = Seleccionar IA
+MenuBrowser = Seleccionar navegador
+MenuAutoStart = Iniciar con Windows
+MenuLanguage = Idioma
+MenuExit = Salir
+MenuAbout = Acerca de
+AboutTitle = Acerca de AI Copilot Mapper
+AboutText = Desarrollado para reasignar la tecla Copilot a tu IA favorita o a una tecla del sistema.

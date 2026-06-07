@@ -1,0 +1,14 @@
+[Language]
+LanguageName = Italiano
+MenuMode = Funzione pulsante
+ModeAI = Scorciatoia IA
+ModeCTRL = CTRL destro
+ModeALT = ALT destro
+MenuAI = Seleziona IA
+MenuBrowser = Seleziona browser
+MenuAutoStart = Avvia con Windows
+MenuLanguage = Lingua
+MenuExit = Esci
+MenuAbout = Informazioni
+AboutTitle = Informazioni su AI Copilot Mapper
+AboutText = Sviluppato per rimappare il tasto Copilot sulla tua IA preferita o su un tasto di sistema.

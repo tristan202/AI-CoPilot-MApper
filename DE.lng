@@ -1,0 +1,14 @@
+[Language]
+LanguageName = Deutsch
+MenuMode = Tastenfunktion
+ModeAI = KI-Verknüpfung
+ModeCTRL = Rechtes CTRL
+ModeALT = Rechtes ALT
+MenuAI = KI auswählen
+MenuBrowser = Browser auswählen
+MenuAutoStart = Mit Windows starten
+MenuLanguage = Sprache
+MenuExit = Beenden
+MenuAbout = Über
+AboutTitle = Über AI Copilot Mapper
+AboutText = Entwickelt, um die Copilot-Taste Ihrer Lieblings-KI oder einer Systemtaste neu zuzuweisen.
