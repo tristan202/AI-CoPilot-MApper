@@ -1,5 +1,5 @@
 [Language]
-LanguageName = Francais
+LanguageName = Français
 MenuMode = Fonction du bouton
 ModeAI = Raccourci IA
 ModeCTRL = CTRL droit
@@ -10,5 +10,17 @@ MenuAutoStart = Démarrer avec Windows
 MenuLanguage = Langue
 MenuExit = Quitter
 MenuAbout = À propos
+MenuLaunchMode = Mode de lancement
+LaunchApp = Fenêtre d'application
+LaunchTab = Onglet normal
+LaunchWindow = Nouvelle fenêtre
+LaunchDefault = Valeur système par défaut
+MenuPause = Mettre le mappage en pause
+MenuProfiles = Profils par application
+ProfileOpen = Ouvrir le fichier de profils
+ProfileReload = Recharger les profils
+ProfileTemplate = Créer un modèle de profils
+CustomAIAdd = Ajouter/modifier une IA personnalisée...
+CustomAIRemove = Supprimer l'IA personnalisée sélectionnée
 AboutTitle = À propos de AI Copilot Mapper
-AboutText = Développé pour remapper la touche Copilot vers votre IA préférée ou une touche système.
+AboutText = Développé pour remapper la touche Copilot vers votre IA préférée, un service d'IA local ou une touche système. Nouveau dans 1.2.x : IA et URL personnalisées, endpoints d'IA locale, protection contre la répétition des touches, plusieurs modes de lancement, pause et profils par application.
