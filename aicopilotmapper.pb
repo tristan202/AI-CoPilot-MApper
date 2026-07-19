@@ -394,16 +394,23 @@ Procedure OpenEmbeddedAI(URL.s)
   URL = NormalizeURL(URL)
   If URL = "" : ProcedureReturn : EndIf
   
-  ; If window is already open, just bring it forward and load URL if changed
   If IsWindow(#AIWin)
+    SetWindowState(#AIWin, #PB_Window_Normal)
+    StickyWindow(#AIWin, 1)
     SetActiveWindow(#AIWin)
+    StickyWindow(#AIWin, 0)
+    
     SetGadgetText(#AIGadget, URL)
     ProcedureReturn
   EndIf
   
-  ; Open clean frame interface that acts like a dedicated app window
   If OpenWindow(#AIWin, #PB_Ignore, #PB_Ignore, 1024, 768, "AI Copilot View", #PB_Window_SystemMenu | #PB_Window_ScreenCentered | #PB_Window_SizeGadget | #PB_Window_MaximizeGadget)
-If WebViewGadget(#AIGadget, 0, 0, 1024, 768)
+    
+    StickyWindow(#AIWin, 1)
+    SetActiveWindow(#AIWin)
+    StickyWindow(#AIWin, 0)
+    
+    If WebViewGadget(#AIGadget, 0, 0, 1024, 768)
       SetGadgetText(#AIGadget, URL) 
       ResizeGadget(#AIGadget, 0, 0, WindowWidth(#AIWin), WindowHeight(#AIWin))
     EndIf
@@ -999,7 +1006,8 @@ DataSection
   AppIconEnd:
 EndDataSection
 ; IDE Options = PureBasic 6.40 (Windows - x64)
-; CursorPosition = 10
+; CursorPosition = 418
+; FirstLine = 389
 ; Folding = -----
 ; EnableXP
 ; DPIAware
