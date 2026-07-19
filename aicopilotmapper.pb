@@ -8,7 +8,7 @@ Import "Kernel32.lib"
 EndImport
 
 ; --- CONSTANTS ---
-#AppVersion = "1.2.1"
+#AppVersion = "1.3.0"
 
 ; Browser structure
 Structure BrowserInfo
@@ -30,9 +30,6 @@ Structure LangInfo
 EndStructure
 
 ; Simple per-app profile structure
-; Mode:       -1 = inherit, 0 = AI Mode, 1 = R-CTRL Mode, 2 = R-ALT Mode
-; LaunchMode: -1 = inherit, 0 = app window, 1 = normal tab, 2 = new window, 3 = system default
-; Paused:     -1 = inherit, 0 = active, 1 = paused for this process
 Structure AppProfileInfo
   Process.s
   Mode.i
@@ -48,6 +45,10 @@ Global NewList AvailableLanguages.LangInfo()
 Global NewList AIServices.AIServiceInfo()
 Global NewList AppProfiles.AppProfileInfo()
 
+; Embedded view
+Global PendingLaunchURL.s = ""
+Global PendingLaunchMode.i = 0
+
 ; Settings & Files
 Global IniFile.s = GetPathPart(ProgramFilename()) + "AICopilotMapper.ini"
 Global ProfileFile.s = GetPathPart(ProgramFilename()) + "AICopilotMapper_profiles.ini"
@@ -59,12 +60,13 @@ Global AutoStart.i = 0
 Global Language.s = "DA"
 Global ButtonMode.i = 0 ; 0 = AI Mode, 1 = R-CTRL Mode, 2 = R-ALT Mode
 Global LaunchMode.i = 0 ; 0 = Browser app window, 1 = normal tab, 2 = new window, 3 = system default
-Global MappingPaused.i = 0 ; runtime pause, not persisted
-Global CopilotKeyDown.i = 0 ; debounce so holding the key does not repeatedly launch AI
-Global ActiveRemapVKey.w = 0 ; remembers which synthetic modifier is currently held
+Global UseEmbeddedBrowser.i = 1 ; 1 = WebView2Gadget (Default), 0 = External Browser
+Global MappingPaused.i = 0 
+Global CopilotKeyDown.i = 0 
+Global ActiveRemapVKey.w = 0 
 Global hMutex, hHook
 
-; String Variables for UI (Loaded via .lng file or fallback)
+; String Variables for UI
 Global Txt_MsgBoxTitle.s, Txt_MsgBoxRunning.s
 Global Txt_TrayTooltip.s, Txt_MenuBrowser.s, Txt_MenuAI.s
 Global Txt_MenuAutoStart.s, Txt_MenuLanguage.s, Txt_MenuAbout.s, Txt_MenuExit.s
@@ -73,6 +75,11 @@ Global Txt_MenuMode.s, Txt_ModeAI.s, Txt_ModeCTRL.s, Txt_ModeALT.s
 Global Txt_MenuLaunchMode.s, Txt_LaunchApp.s, Txt_LaunchTab.s, Txt_LaunchWindow.s, Txt_LaunchDefault.s
 Global Txt_MenuPause.s, Txt_MenuProfiles.s, Txt_ProfileOpen.s, Txt_ProfileReload.s, Txt_ProfileTemplate.s
 Global Txt_CustomAIAdd.s, Txt_CustomAIRemove.s
+Global Txt_MenuEmbedded.s ; New localization string
+
+Enumeration #PB_Event_FirstCustomValue
+  #Event_OpenCopilot
+EndEnumeration
 
 ; Menu and Gadget IDs
 Enumeration
@@ -82,6 +89,8 @@ Enumeration
   #About_TextGadget
   #About_CloseBtn
   #MainWin
+  #AIWin
+  #AIGadget
   #TrayMenu
   #TrayIcon
   #AppIcon
@@ -92,6 +101,7 @@ Enumeration
   #Menu_Launch_Tab
   #Menu_Launch_Window
   #Menu_Launch_Default
+  #Menu_Embedded
   #Menu_AutoStart
   #Menu_Pause
   #Menu_CustomAI_Add
@@ -102,12 +112,11 @@ Enumeration
   #Menu_About
   #Menu_Exit
   #Menu_Browser_Base = 100 
-  #Menu_Lang_Base    = 200 ; Dynamic language items start here
-  #Menu_AI_Base      = 300 ; Dynamic AI items start here
+  #Menu_Lang_Base    = 200 
+  #Menu_AI_Base      = 300 
 EndEnumeration
 
 ; --- 1. INSTANCE CHECK (MUTEX) ---
-; Placeret helt i toppen for at afvise ekstra instanser øjeblikkeligt.
 Global MutexName.s = "Global\AICopilotMapper_Unique_ID"
 hMutex = CreateMutex_(0, 1, @MutexName)
 If GetLastError_() = 183 : End : EndIf
@@ -126,7 +135,6 @@ EndProcedure
 Procedure.s NormalizeURL(URL.s)
   URL = Trim(URL)
   If URL <> "" And StartsWithProtocol(URL) = 0
-    ; Local endpoints such as localhost/127.0.0.1 normally use http, everything else defaults to https.
     If Left(LCase(URL), 9) = "localhost" Or Left(URL, 9) = "127.0.0.1" Or Left(URL, 5) = "[::1]"
       URL = "http://" + URL
     Else
@@ -143,7 +151,6 @@ Procedure.i BrowserIsExplicit()
   ProcedureReturn 0
 EndProcedure
 
-; Modern replacement for keybd_event_ using SendInput_
 Procedure SendKeyInput(VKey.w, Flags.l)
   Protected Input.INPUT
   Input\type = #INPUT_KEYBOARD
@@ -155,7 +162,6 @@ Procedure SendKeyInput(VKey.w, Flags.l)
   SendInput_(1, @Input, SizeOf(INPUT))
 EndProcedure
 
-; Reads a string from the Windows Registry
 Procedure.s ReadRegString(hKeyRoot, KeyPath.s, ValueName.s)
   Protected hKey.i, Type.i, BufferSize.i = 1024
   Protected *Buffer = AllocateMemory(BufferSize)
@@ -172,14 +178,12 @@ Procedure.s ReadRegString(hKeyRoot, KeyPath.s, ValueName.s)
   ProcedureReturn Result
 EndProcedure
 
-; Scans the registry for installed web browsers
 Procedure GetInstalledBrowsers()
   Protected hKey.i, Index.i = 0
   Protected KeyName.s = Space(256), KeyNameSize.i
   Protected SubKeyName.s, BName.s, BPath.s
   ClearList(InstalledBrowsers())
   
-  ; HKLM browser registration
   If RegOpenKeyEx_(#HKEY_LOCAL_MACHINE, "SOFTWARE\Clients\StartMenuInternet", 0, #KEY_READ, @hKey) = #ERROR_SUCCESS
     Repeat
       KeyNameSize = 256
@@ -205,7 +209,6 @@ Procedure GetInstalledBrowsers()
     RegCloseKey_(hKey)
   EndIf
   
-  ; HKCU browser registration - catches some per-user installations
   Index = 0
   If RegOpenKeyEx_(#HKEY_CURRENT_USER, "SOFTWARE\Clients\StartMenuInternet", 0, #KEY_READ, @hKey) = #ERROR_SUCCESS
     Repeat
@@ -232,7 +235,6 @@ Procedure GetInstalledBrowsers()
     RegCloseKey_(hKey)
   EndIf
   
-  ; Fallback hvis listen er tom
   If ListSize(InstalledBrowsers()) = 0
     AddElement(InstalledBrowsers())
     InstalledBrowsers()\Name = "System Default"
@@ -240,7 +242,6 @@ Procedure GetInstalledBrowsers()
   EndIf
 EndProcedure
 
-; Scans the application directory for .lng files dynamically
 Procedure GetAvailableLanguages()
   Protected Directory.s = GetPathPart(ProgramFilename())
   Protected DirID.i, FileName.s, LangCode.s
@@ -252,7 +253,7 @@ Procedure GetAvailableLanguages()
     While NextDirectoryEntry(DirID)
       If DirectoryEntryType(DirID) = #PB_DirectoryEntry_File
         FileName = DirectoryEntryName(DirID)
-        LangCode = UCase(Left(FileName, Len(FileName) - 4)) ; Remove ".lng"
+        LangCode = UCase(Left(FileName, Len(FileName) - 4))
         
         If OpenPreferences(Directory + FileName, #PB_UTF8)
           PreferenceGroup("Language")
@@ -266,7 +267,6 @@ Procedure GetAvailableLanguages()
     FinishDirectory(DirID)
   EndIf
   
-  ; Fallback if no language files are found on disk
   If ListSize(AvailableLanguages()) = 0
     AddElement(AvailableLanguages())
     AvailableLanguages()\Code = "DA"
@@ -306,7 +306,6 @@ Procedure LoadAIServices()
   Protected Count.i, I.i, Name.s, URL.s
   ClearList(AIServices())
   
-  ; Built-in services
   AddAIService("Gemini", "https://gemini.google.com", 0)
   AddAIService("Kimi", "https://www.kimi.com", 0)
   AddAIService("ChatGPT", "https://chatgpt.com", 0)
@@ -315,7 +314,6 @@ Procedure LoadAIServices()
   AddAIService("Perplexity", "https://www.perplexity.ai", 0)
   AddAIService("Copilot", "https://copilot.microsoft.com", 0)
   
-  ; Custom services from INI, e.g. local Open WebUI, Ollama WebUI, LibreChat etc.
   If OpenPreferences(IniFile, #PB_UTF8)
     PreferenceGroup("CustomAI")
     Count = ReadPreferenceInteger("Count", 0)
@@ -349,7 +347,6 @@ Procedure SaveCustomAIServices()
   EndIf
 EndProcedure
 
-; Maps the selected AI to its respective URL
 Procedure UpdateTargetURL()
   TargetURL = GetAIURLByName(SelectedAI)
 EndProcedure
@@ -392,47 +389,68 @@ Procedure.s LaunchModeName(Mode.i)
   ProcedureReturn Txt_LaunchApp
 EndProcedure
 
+; New Embedded WebView2 Window launcher
+Procedure OpenEmbeddedAI(URL.s)
+  URL = NormalizeURL(URL)
+  If URL = "" : ProcedureReturn : EndIf
+  
+  ; If window is already open, just bring it forward and load URL if changed
+  If IsWindow(#AIWin)
+    SetActiveWindow(#AIWin)
+    SetGadgetText(#AIGadget, URL)
+    ProcedureReturn
+  EndIf
+  
+  ; Open clean frame interface that acts like a dedicated app window
+  If OpenWindow(#AIWin, #PB_Ignore, #PB_Ignore, 1024, 768, "AI Copilot View", #PB_Window_SystemMenu | #PB_Window_ScreenCentered | #PB_Window_SizeGadget | #PB_Window_MaximizeGadget)
+If WebViewGadget(#AIGadget, 0, 0, 1024, 768)
+      SetGadgetText(#AIGadget, URL) 
+      ResizeGadget(#AIGadget, 0, 0, WindowWidth(#AIWin), WindowHeight(#AIWin))
+    EndIf
+  EndIf
+EndProcedure
+
 Procedure LaunchTarget(URL.s, UseLaunchMode.i)
+  ; Route through embedded handler if preference option flag matches active setting state
+  If UseEmbeddedBrowser = 1
+    OpenEmbeddedAI(URL)
+    ProcedureReturn
+  EndIf
+
   URL = NormalizeURL(URL)
   If URL = "" : ProcedureReturn : EndIf
   
   Select UseLaunchMode
-    Case 0 ; Browser app window, best with Chromium-based browsers
+    Case 0 
       If BrowserIsExplicit()
         RunProgram(BrowserPath, "--app=" + Chr(34) + URL + Chr(34), "")
       Else
         RunProgram(URL, "", "")
       EndIf
-      
-    Case 1 ; Normal browser tab/window using selected browser if possible
+    Case 1 
       If BrowserIsExplicit()
         RunProgram(BrowserPath, Chr(34) + URL + Chr(34), "")
       Else
         RunProgram(URL, "", "")
       EndIf
-      
-    Case 2 ; New browser window
+    Case 2 
       If BrowserIsExplicit()
         RunProgram(BrowserPath, "--new-window " + Chr(34) + URL + Chr(34), "")
       Else
         RunProgram(URL, "", "")
       EndIf
-      
-    Case 3 ; System default browser/handler
+    Case 3 
       RunProgram(URL, "", "")
-      
     Default
       RunProgram(URL, "", "")
   EndSelect
 EndProcedure
 
-; Dynamic Language Loader (.lng files) with hardcoded Danish fallback
 Procedure UpdateLanguageStrings()
   Protected AppName.s = "AI Copilot Mapper"
   Protected VerPrefix.s = " v" + #AppVersion + Chr(10)
   Protected LngFile.s = GetPathPart(ProgramFilename()) + Language + ".lng"
   
-  ; Sæt hårdkodede standardværdier (Dansk fallback) først
   Txt_MenuMode = "Knap Funktion" : Txt_ModeAI = "AI Genvej" : Txt_ModeCTRL = "Højre CTRL" : Txt_ModeALT = "Højre ALT"
   Txt_MenuAI = "Vælg AI" : Txt_MenuBrowser = "Vælg Browser" : Txt_MenuAutoStart = "Start med Windows"
   Txt_MenuLanguage = "Sprog" : Txt_MenuExit = "Afslut" : Txt_MenuAbout = "Om programmet"
@@ -444,10 +462,10 @@ Procedure UpdateLanguageStrings()
   Txt_ProfileTemplate = "Opret profil-skabelon"
   Txt_CustomAIAdd = "Tilføj/ret custom AI..."
   Txt_CustomAIRemove = "Fjern valgt custom AI"
+  Txt_MenuEmbedded = "Brug Indbygget View (Hurtig)"
   Txt_AboutTitle = "Om " + AppName
-  Txt_AboutText = AppName + VerPrefix + "Udviklet til at omkode Copilot-tasten til din foretrukne AI, en lokal AI-tjeneste eller en systemtast." + Chr(10) + Chr(10) + "Nyt i 1.2.0:" + Chr(10) + "- Custom AI og custom URL" + Chr(10) + "- Local AI endpoints" + Chr(10) + "- Key-repeat beskyttelse" + Chr(10) + "- Flere åbningsmetoder" + Chr(10) + "- Pause og profiler pr. app"
+  Txt_AboutText = AppName + VerPrefix + "Udviklet til at omkode Copilot-tasten til din foretrukne AI, en lokal AI-tjeneste eller en systemtast." + Chr(10) + Chr(10) + "Nyt i 1.2.1:" + Chr(10) + "- Indbygget WebView2 Browser integration"
   
-  ; Forsøg at indlæse fra ekstern .lng fil, hvis den eksisterer
   If FileSize(LngFile) > 0
     If OpenPreferences(LngFile, #PB_UTF8)
       PreferenceGroup("Language")
@@ -473,6 +491,7 @@ Procedure UpdateLanguageStrings()
       Txt_ProfileTemplate = ReadPreferenceString("ProfileTemplate", Txt_ProfileTemplate)
       Txt_CustomAIAdd = ReadPreferenceString("CustomAIAdd", Txt_CustomAIAdd)
       Txt_CustomAIRemove = ReadPreferenceString("CustomAIRemove", Txt_CustomAIRemove)
+      Txt_MenuEmbedded = ReadPreferenceString("MenuEmbedded", Txt_MenuEmbedded)
       Txt_AboutTitle = ReadPreferenceString("AboutTitle", Txt_AboutTitle)
       Txt_AboutText = AppName + VerPrefix + ReadPreferenceString("AboutText", "Developed to remap the Copilot key.")
       ClosePreferences()
@@ -496,11 +515,14 @@ Procedure UpdateTrayTooltip()
     Case 1 : Tip + Txt_ModeCTRL
     Case 2 : Tip + Txt_ModeALT
   EndSelect
-  Tip + Chr(10) + "Åbning: " + LaunchModeName(LaunchMode)
+  If UseEmbeddedBrowser
+    Tip + Chr(10) + "Åbning: WebView2 (Embedded)"
+  Else
+    Tip + Chr(10) + "Åbning: " + LaunchModeName(LaunchMode)
+  EndIf
   SysTrayIconToolTip(#TrayIcon, Tip)
 EndProcedure
 
-; Builds the system tray popup menu
 Procedure RebuildMenu()
   Protected Index.i = 0
   If IsMenu(#TrayMenu)
@@ -508,7 +530,6 @@ Procedure RebuildMenu()
   EndIf
   
   If CreatePopupMenu(#TrayMenu)
-    ; Mode Selection
     OpenSubMenu(Txt_MenuMode)
       MenuItem(#Menu_Mode_AI, Txt_ModeAI)
       MenuItem(#Menu_Mode_CTRL, Txt_ModeCTRL)
@@ -516,7 +537,6 @@ Procedure RebuildMenu()
     CloseSubMenu()
     MenuBar()
     
-    ; AI submenu - now dynamic, so custom services appear automatically
     OpenSubMenu(Txt_MenuAI)
       Index = 0
       ForEach AIServices()
@@ -542,7 +562,6 @@ Procedure RebuildMenu()
       MenuItem(#Menu_CustomAI_Remove, Txt_CustomAIRemove)
     CloseSubMenu()
     
-    ; Browser submenu
     OpenSubMenu(Txt_MenuBrowser)
       Index = 0
       ForEach InstalledBrowsers()
@@ -554,7 +573,6 @@ Procedure RebuildMenu()
       Next
     CloseSubMenu()
     
-    ; Launch mode submenu
     OpenSubMenu(Txt_MenuLaunchMode)
       MenuItem(#Menu_Launch_App, Txt_LaunchApp)
       MenuItem(#Menu_Launch_Tab, Txt_LaunchTab)
@@ -563,17 +581,16 @@ Procedure RebuildMenu()
     CloseSubMenu()
     
     MenuBar()
+    MenuItem(#Menu_Embedded, Txt_MenuEmbedded) ; New checkbox configuration item
     MenuItem(#Menu_AutoStart, Txt_MenuAutoStart)
     MenuItem(#Menu_Pause, Txt_MenuPause)
     
-    ; Per-app profiles submenu
     OpenSubMenu(Txt_MenuProfiles)
       MenuItem(#Menu_Profile_Open, Txt_ProfileOpen)
       MenuItem(#Menu_Profile_Reload, Txt_ProfileReload)
       MenuItem(#Menu_Profile_Template, Txt_ProfileTemplate)
     CloseSubMenu()
     
-    ; Dynamic Language Submenu
     OpenSubMenu(Txt_MenuLanguage)
       Index = 0
       ForEach AvailableLanguages()
@@ -589,7 +606,6 @@ Procedure RebuildMenu()
     MenuItem(#Menu_About, Txt_MenuAbout)
     MenuItem(#Menu_Exit, Txt_MenuExit)
     
-    ; Set Menu Item States
     SetMenuItemState(#TrayMenu, #Menu_Mode_AI, Bool(ButtonMode = 0))
     SetMenuItemState(#TrayMenu, #Menu_Mode_CTRL, Bool(ButtonMode = 1))
     SetMenuItemState(#TrayMenu, #Menu_Mode_ALT, Bool(ButtonMode = 2))
@@ -597,6 +613,7 @@ Procedure RebuildMenu()
     SetMenuItemState(#TrayMenu, #Menu_Launch_Tab, Bool(LaunchMode = 1))
     SetMenuItemState(#TrayMenu, #Menu_Launch_Window, Bool(LaunchMode = 2))
     SetMenuItemState(#TrayMenu, #Menu_Launch_Default, Bool(LaunchMode = 3))
+    SetMenuItemState(#TrayMenu, #Menu_Embedded, UseEmbeddedBrowser) ; Persists active checked state
     SetMenuItemState(#TrayMenu, #Menu_AutoStart, AutoStart)
     SetMenuItemState(#TrayMenu, #Menu_Pause, MappingPaused)
   EndIf
@@ -610,7 +627,7 @@ Procedure.i SetAutoStartRegistry(Enable.i)
   Protected ValueName.s = "AICopilotMapper"
   Protected Path.s = Chr(34) + ProgramFilename() + Chr(34)
   Protected DataSize.i = StringByteLength(Path) + SizeOf(Character)
-  Protected AccessMask.i = $0002 ; KEY_SET_VALUE
+  Protected AccessMask.i = $0002 
   
   Result = RegOpenKeyEx_(#HKEY_CURRENT_USER, KeyPath, 0, AccessMask, @hKey)
   
@@ -620,10 +637,7 @@ Procedure.i SetAutoStartRegistry(Enable.i)
     Else
       Result = RegDeleteValue_(hKey, ValueName)
       If Result <> #ERROR_SUCCESS
-        ; If the value was already gone, treat it as success.
-        If Result = 2
-          Result = #ERROR_SUCCESS
-        EndIf
+        If Result = 2 : Result = #ERROR_SUCCESS : EndIf
       EndIf
     EndIf
     RegCloseKey_(hKey)
@@ -637,7 +651,6 @@ Procedure.i SetAutoStartRegistry(Enable.i)
   ProcedureReturn 1
 EndProcedure
 
-; Saves user settings to INI file
 Procedure SaveSettings()
   If OpenPreferences(IniFile, #PB_UTF8) Or CreatePreferences(IniFile, #PB_UTF8)
     PreferenceGroup("Settings")
@@ -647,11 +660,11 @@ Procedure SaveSettings()
     WritePreferenceString("AI", SelectedAI)
     WritePreferenceInteger("ButtonMode", ButtonMode)
     WritePreferenceInteger("LaunchMode", LaunchMode)
+    WritePreferenceInteger("UseEmbeddedBrowser", UseEmbeddedBrowser) ; Save active choice
     ClosePreferences()
   EndIf
 EndProcedure
 
-; Loads user settings from INI file
 Procedure LoadSettings()
   If OpenPreferences(IniFile, #PB_UTF8)
     PreferenceGroup("Settings")
@@ -661,10 +674,10 @@ Procedure LoadSettings()
     SelectedAI = ReadPreferenceString("AI", "Gemini")
     ButtonMode = ReadPreferenceInteger("ButtonMode", 0)
     LaunchMode = ReadPreferenceInteger("LaunchMode", 0)
+    UseEmbeddedBrowser = ReadPreferenceInteger("UseEmbeddedBrowser", 1) ; Defaults to 1 (Enabled)
     ClosePreferences()
   EndIf
   
-  ; Sikkerheds-fallback hvis BrowserPath er tom eller ugyldig
   If BrowserPath = "" Or (LCase(BrowserPath) <> "explorer.exe" And FileSize(BrowserPath) < 0)
     If FirstElement(InstalledBrowsers())
       BrowserPath = InstalledBrowsers()\Path
@@ -697,22 +710,6 @@ Procedure CreateProfileTemplate(Overwrite.i)
     WriteStringN(File, "[Profiles]")
     WriteStringN(File, "Count=0")
     WriteStringN(File, "")
-    WriteStringN(File, "; Eksempel:")
-    WriteStringN(File, "; Count=1")
-    WriteStringN(File, "; 1Process=notepad.exe")
-    WriteStringN(File, "; 1Mode=0")
-    WriteStringN(File, "; 1AIName=ChatGPT")
-    WriteStringN(File, "; 1AIURL=")
-    WriteStringN(File, "; 1LaunchMode=1")
-    WriteStringN(File, "; 1Paused=0")
-    WriteStringN(File, "")
-    WriteStringN(File, "; Local AI eksempel:")
-    WriteStringN(File, "; 2Process=code.exe")
-    WriteStringN(File, "; 2Mode=0")
-    WriteStringN(File, "; 2AIName=")
-    WriteStringN(File, "; 2AIURL=http://localhost:3000")
-    WriteStringN(File, "; 2LaunchMode=1")
-    WriteStringN(File, "; 2Paused=0")
     CloseFile(File)
   EndIf
 EndProcedure
@@ -755,7 +752,6 @@ Procedure.s GetActiveProcessName()
   GetWindowThreadProcessId_(hWnd, @PID)
   If PID = 0 : ProcedureReturn "" : EndIf
   
-  ; PROCESS_QUERY_LIMITED_INFORMATION = $1000
   hProcess = OpenProcess_($1000, 0, PID)
   If hProcess
     If QueryFullProcessImageNameW(hProcess, 0, @Buffer, @Size)
@@ -792,18 +788,16 @@ Procedure.l KeyboardProc(nCode, wParam, lParam)
     ProcedureReturn CallNextHookEx_(hHook, nCode, wParam, lParam)
   EndIf
 
-  ; Ignore injected keystrokes so our synthetic RCTRL/RALT does not loop back into the hook.
   If *pkbdll\flags & $10
     ProcedureReturn CallNextHookEx_(hHook, nCode, wParam, lParam)
   EndIf
 
-  If *pkbdll\vkCode = $86 ; Copilot Key / F23
+  If *pkbdll\vkCode = $86 
     EffMode = ButtonMode
     EffLaunchMode = LaunchMode
     EffPaused = MappingPaused
     EffURL = TargetURL
     
-    ; Per-app profile overrides are resolved at the moment the key is pressed.
     If FindActiveProfile()
       If AppProfiles()\Paused = 1
         EffPaused = 1
@@ -832,19 +826,19 @@ Procedure.l KeyboardProc(nCode, wParam, lParam)
     EndIf
     
     If wParam = #WM_KEYDOWN Or wParam = #WM_SYSKEYDOWN
-      ; Debounce: only act once per physical key press.
       If CopilotKeyDown = 0
         CopilotKeyDown = 1
         
         Select EffMode
-          Case 0 ; --- AI Shortcut Mode ---
-            LaunchTarget(EffURL, EffLaunchMode)
+          Case 0 
+            PendingLaunchURL = EffURL
+            PendingLaunchMode = EffLaunchMode
+            PostEvent(#Event_OpenCopilot)
             
-          Case 1, 2 ; --- Modifier Remapping Mode (SendInput) ---
+          Case 1, 2 
             If EffMode = 1 : VKey = #VK_RCONTROL : Else : VKey = #VK_RMENU : EndIf
             ActiveRemapVKey = VKey
             
-            ; The physical Copilot combo often arrives with modifiers; release them before emulating.
             If GetAsyncKeyState_(#VK_LSHIFT) & $8000
               SendKeyInput(#VK_LSHIFT, #KEYEVENTF_KEYUP)
             EndIf
@@ -855,7 +849,6 @@ Procedure.l KeyboardProc(nCode, wParam, lParam)
             SendKeyInput(VKey, 0)
         EndSelect
       EndIf
-      
       ProcedureReturn 1
       
     ElseIf wParam = #WM_KEYUP Or wParam = #WM_SYSKEYUP
@@ -866,7 +859,6 @@ Procedure.l KeyboardProc(nCode, wParam, lParam)
       CopilotKeyDown = 0
       ProcedureReturn 1
     EndIf
-    
     ProcedureReturn 1
   EndIf
 
@@ -875,15 +867,14 @@ EndProcedure
 
 
 ; --- 4. APPLICATION INITIALIZATION ---
-
-GetAvailableLanguages() ; Scans for languages first
+SetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", GetPathPart(ProgramFilename()) + "WebViewData")
+GetAvailableLanguages() 
 LoadAIServices()
 GetInstalledBrowsers()
 LoadSettings()
 LoadAppProfiles()
 UpdateLanguageStrings()
 
-; Hidden window to handle background events and tray menu
 If OpenWindow(#MainWin, 0, 0, 0, 0, "AICopilotMapper", #PB_Window_Invisible)
   
   CatchImage(#AppIcon, ?AppIconStart, ?AppIconEnd - ?AppIconStart)
@@ -893,13 +884,31 @@ If OpenWindow(#MainWin, 0, 0, 0, 0, "AICopilotMapper", #PB_Window_Invisible)
   
   hHook = SetWindowsHookEx_(13, @KeyboardProc(), GetModuleHandle_(0), 0)
   If hHook = 0
-    MessageRequester("Keyboard hook fejl", "Kunne ikke installere keyboard hook." + Chr(10) + "Fejlkode: " + Str(GetLastError_()), #PB_MessageRequester_Error)
+    MessageRequester("Keyboard hook fejl", "Kunne ikke installere keyboard hook.", #PB_MessageRequester_Error)
   EndIf
   
   ; Main Event Loop
   Repeat
     Define Event.i = WaitWindowEvent()
-    Select Event
+    
+    ; Capture dynamic resizing for embedded layout window bounds
+    If Event = #PB_Event_SizeWindow And EventWindow() = #AIWin
+      ResizeGadget(#AIGadget, 0, 0, WindowWidth(#AIWin), WindowHeight(#AIWin))
+    EndIf
+    
+    Select Event      
+      Case #Event_OpenCopilot
+        LaunchTarget(PendingLaunchURL, PendingLaunchMode)
+        
+      Case #PB_Event_CloseWindow
+        ; If the user hits Close on the AI Window frame, close just the view window
+        If EventWindow() = #AIWin
+          CloseWindow(#AIWin)
+        Else
+          ; If it somehow hits main, break loop
+          Break
+        EndIf
+
       Case #PB_Event_SysTray
         If EventType() = #PB_EventType_RightClick Or EventType() = #PB_EventType_LeftClick
           DisplayPopupMenu(#TrayMenu, WindowID(#MainWin))
@@ -908,18 +917,15 @@ If OpenWindow(#MainWin, 0, 0, 0, 0, "AICopilotMapper", #PB_Window_Invisible)
       Case #PB_Event_Menu
         Define MenuID.i = EventMenu()
         
-        ; Handle dynamic browser clicks
         If MenuID >= #Menu_Browser_Base And MenuID < #Menu_Browser_Base + ListSize(InstalledBrowsers())
           SelectElement(InstalledBrowsers(), MenuID - #Menu_Browser_Base)
           BrowserPath = InstalledBrowsers()\Path : SaveSettings() : RebuildMenu()
           
-        ; Handle dynamic language clicks
         ElseIf MenuID >= #Menu_Lang_Base And MenuID < #Menu_Lang_Base + ListSize(AvailableLanguages())
           SelectElement(AvailableLanguages(), MenuID - #Menu_Lang_Base)
           Language = AvailableLanguages()\Code
           UpdateLanguageStrings() : SaveSettings() : RebuildMenu()
           
-        ; Handle dynamic AI clicks
         ElseIf MenuID >= #Menu_AI_Base And MenuID < #Menu_AI_Base + ListSize(AIServices())
           SelectElement(AIServices(), MenuID - #Menu_AI_Base)
           SelectedAI = AIServices()\Name
@@ -936,6 +942,10 @@ If OpenWindow(#MainWin, 0, 0, 0, 0, "AICopilotMapper", #PB_Window_Invisible)
             Case #Menu_Launch_Window  : LaunchMode = 2 : SaveSettings() : RebuildMenu()
             Case #Menu_Launch_Default : LaunchMode = 3 : SaveSettings() : RebuildMenu()
             
+            Case #Menu_Embedded
+              UseEmbeddedBrowser = 1 - UseEmbeddedBrowser
+              SaveSettings() : RebuildMenu()
+
             Case #Menu_CustomAI_Add
               AddOrEditCustomAI()
               SaveSettings() : RebuildMenu()
@@ -961,53 +971,35 @@ If OpenWindow(#MainWin, 0, 0, 0, 0, "AICopilotMapper", #PB_Window_Invisible)
               EndIf
               RebuildMenu()
               
-            Case #Menu_Profile_Open
-              OpenProfileFile()
-              
+            Case #Menu_Profile_Open     : OpenProfileFile()
             Case #Menu_Profile_Reload
               LoadAppProfiles()
-              MessageRequester("Profiler", "Profiler er genindlæst." + Chr(10) + "Aktive profiler: " + Str(ListSize(AppProfiles())), #PB_MessageRequester_Info)
+              MessageRequester("Profiler", "Profiler er genindlæst.", #PB_MessageRequester_Info)
               RebuildMenu()
               
-            Case #Menu_Profile_Template
-              CreateProfileTemplate(1)
-              OpenProfileFile()
-              
-            Case #Menu_About
-              MessageRequester(Txt_AboutTitle, Txt_AboutText, #PB_MessageRequester_Info)
-              
-            Case #Menu_Exit
-              Break
+            Case #Menu_Profile_Template : CreateProfileTemplate(1) : OpenProfileFile()
+            Case #Menu_About            : MessageRequester(Txt_AboutTitle, Txt_AboutText, #PB_MessageRequester_Info)
+            Case #Menu_Exit             : Break
           EndSelect
         EndIf
     EndSelect
-  Until Event = #PB_Event_CloseWindow
+  ForEver ; Kept alive dynamically unless standard break exit event triggers
 
   ; Cleanup before exit
-  If ActiveRemapVKey <> 0
-    SendKeyInput(ActiveRemapVKey, #KEYEVENTF_KEYUP)
-  EndIf
+  If IsWindow(#AIWin) : CloseWindow(#AIWin) : EndIf
+  If ActiveRemapVKey <> 0 : SendKeyInput(ActiveRemapVKey, #KEYEVENTF_KEYUP) : EndIf
   If hHook : UnhookWindowsHookEx_(hHook) : EndIf
   RemoveSysTrayIcon(#TrayIcon)
   If hMutex : CloseHandle_(hMutex) : EndIf
 EndIf
 
-; Embedded resources
 DataSection
   AppIconStart: 
     IncludeBinary "aicopilotmapper.ico"
   AppIconEnd:
 EndDataSection
 ; IDE Options = PureBasic 6.40 (Windows - x64)
-; Folding = --
-; EnableXP
-; DPIAware
-; UseIcon = aicopilotmapper.ico
-; Executable = ..\AICopilotMapper.exe
-
-; IDE Options = PureBasic 6.40 (Windows - x64)
-; CursorPosition = 1006
-; FirstLine = 959
+; CursorPosition = 10
 ; Folding = -----
 ; EnableXP
 ; DPIAware
