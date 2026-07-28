@@ -1,16 +1,29 @@
-﻿EnableExplicit
+﻿; ============================================================================
+; Application: AI Copilot Mapper
+; Version: 1.4.0
+; Description: Remaps the Windows Copilot key to custom AI services.
+;              Features an embedded WebView2 browser and per-app profile support.
+; ============================================================================
 
+EnableExplicit
+
+; ----------------------------------------------------------------------------
+; EXTERNAL API IMPORTS
+; ----------------------------------------------------------------------------
 ; PureBasic does not always include a built-in declaration for this WinAPI call.
-; Import the Unicode version explicitly so per-app profiles can read the
+; Import the Unicode version explicitly so per-app profiles can safely read the
 ; foreground process executable name.
 Import "Kernel32.lib"
   QueryFullProcessImageNameW(hProcess.i, dwFlags.l, lpExeName.i, lpdwSize.i)
 EndImport
 
 ; --- CONSTANTS ---
-#AppVersion = "1.3.0"
+#AppVersion = "1.4.0"
 
-; Browser structure
+; ----------------------------------------------------------------------------
+; DATA STRUCTURES
+; ----------------------------------------------------------------------------
+; Browser structure for external browser launching
 Structure BrowserInfo
   Name.s
   Path.s
@@ -29,7 +42,7 @@ Structure LangInfo
   Name.s ; E.g., "Dansk", "English"
 EndStructure
 
-; Simple per-app profile structure
+; Simple per-app profile structure for conditional mapping
 Structure AppProfileInfo
   Process.s
   Mode.i
@@ -39,17 +52,19 @@ Structure AppProfileInfo
   Paused.i
 EndStructure
 
-; Global lists
+; ----------------------------------------------------------------------------
+; GLOBAL VARIABLES & LISTS
+; ----------------------------------------------------------------------------
 Global NewList InstalledBrowsers.BrowserInfo()
 Global NewList AvailableLanguages.LangInfo()
 Global NewList AIServices.AIServiceInfo()
 Global NewList AppProfiles.AppProfileInfo()
 
-; Embedded view
+; Embedded view state variables used for asynchronous event handling
 Global PendingLaunchURL.s = ""
 Global PendingLaunchMode.i = 0
 
-; Settings & Files
+; Settings & File Paths
 Global IniFile.s = GetPathPart(ProgramFilename()) + "AICopilotMapper.ini"
 Global ProfileFile.s = GetPathPart(ProgramFilename()) + "AICopilotMapper_profiles.ini"
 Global AppPath.s = ProgramFilename()
@@ -58,15 +73,19 @@ Global SelectedAI.s = "Gemini"
 Global TargetURL.s = "https://gemini.google.com"
 Global AutoStart.i = 0
 Global Language.s = "DA"
+
+; Operating Modes
 Global ButtonMode.i = 0 ; 0 = AI Mode, 1 = R-CTRL Mode, 2 = R-ALT Mode
 Global LaunchMode.i = 0 ; 0 = Browser app window, 1 = normal tab, 2 = new window, 3 = system default
 Global UseEmbeddedBrowser.i = 1 ; 1 = WebView2Gadget (Default), 0 = External Browser
 Global MappingPaused.i = 0 
+
+; Keyboard Hook States
 Global CopilotKeyDown.i = 0 
 Global ActiveRemapVKey.w = 0 
 Global hMutex, hHook
 
-; String Variables for UI
+; String Variables for UI (Populated by Language Files)
 Global Txt_MsgBoxTitle.s, Txt_MsgBoxRunning.s
 Global Txt_TrayTooltip.s, Txt_MenuBrowser.s, Txt_MenuAI.s
 Global Txt_MenuAutoStart.s, Txt_MenuLanguage.s, Txt_MenuAbout.s, Txt_MenuExit.s
@@ -75,13 +94,15 @@ Global Txt_MenuMode.s, Txt_ModeAI.s, Txt_ModeCTRL.s, Txt_ModeALT.s
 Global Txt_MenuLaunchMode.s, Txt_LaunchApp.s, Txt_LaunchTab.s, Txt_LaunchWindow.s, Txt_LaunchDefault.s
 Global Txt_MenuPause.s, Txt_MenuProfiles.s, Txt_ProfileOpen.s, Txt_ProfileReload.s, Txt_ProfileTemplate.s
 Global Txt_CustomAIAdd.s, Txt_CustomAIRemove.s
-Global Txt_MenuEmbedded.s ; New localization string
+Global Txt_MenuEmbedded.s 
 
+; ----------------------------------------------------------------------------
+; ENUMERATIONS (IDs for Events, Windows, Gadgets, and Menus)
+; ----------------------------------------------------------------------------
 Enumeration #PB_Event_FirstCustomValue
-  #Event_OpenCopilot
+  #Event_OpenCopilot ; Custom event triggered by the keyboard hook to safely open the UI
 EndEnumeration
 
-; Menu and Gadget IDs
 Enumeration
   #AboutWin
   #About_ImageGadget
@@ -90,6 +111,7 @@ Enumeration
   #About_CloseBtn
   #MainWin
   #AIWin
+  #AICombo
   #AIGadget
   #TrayMenu
   #TrayIcon
@@ -116,14 +138,20 @@ Enumeration
   #Menu_AI_Base      = 300 
 EndEnumeration
 
-; --- 1. INSTANCE CHECK (MUTEX) ---
+; ----------------------------------------------------------------------------
+; 1. INSTANCE CHECK (MUTEX)
+; Prevents multiple instances of the application from running simultaneously.
+; ----------------------------------------------------------------------------
 Global MutexName.s = "Global\AICopilotMapper_Unique_ID"
 hMutex = CreateMutex_(0, 1, @MutexName)
 If GetLastError_() = 183 : End : EndIf
 
 
-; --- 2. HELPER FUNCTIONS ---
+; ----------------------------------------------------------------------------
+; 2. HELPER FUNCTIONS
+; ----------------------------------------------------------------------------
 
+; Checks if a URL string begins with a valid protocol scheme (e.g., http://)
 Procedure.i StartsWithProtocol(Text.s)
   Protected L.s = LCase(Text)
   If FindString(L, "://") > 0
@@ -132,6 +160,7 @@ Procedure.i StartsWithProtocol(Text.s)
   ProcedureReturn 0
 EndProcedure
 
+; Normalizes the URL, appending http/https if missing depending on the address
 Procedure.s NormalizeURL(URL.s)
   URL = Trim(URL)
   If URL <> "" And StartsWithProtocol(URL) = 0
@@ -144,6 +173,7 @@ Procedure.s NormalizeURL(URL.s)
   ProcedureReturn URL
 EndProcedure
 
+; Validates if a custom external browser has been explicitly configured
 Procedure.i BrowserIsExplicit()
   If BrowserPath <> "" And LCase(BrowserPath) <> "explorer.exe" And FileSize(BrowserPath) >= 0
     ProcedureReturn 1
@@ -151,6 +181,7 @@ Procedure.i BrowserIsExplicit()
   ProcedureReturn 0
 EndProcedure
 
+; Simulates keyboard input using the Win32 SendInput API (used for key remapping)
 Procedure SendKeyInput(VKey.w, Flags.l)
   Protected Input.INPUT
   Input\type = #INPUT_KEYBOARD
@@ -162,6 +193,7 @@ Procedure SendKeyInput(VKey.w, Flags.l)
   SendInput_(1, @Input, SizeOf(INPUT))
 EndProcedure
 
+; Helper function to safely read string values from the Windows Registry
 Procedure.s ReadRegString(hKeyRoot, KeyPath.s, ValueName.s)
   Protected hKey.i, Type.i, BufferSize.i = 1024
   Protected *Buffer = AllocateMemory(BufferSize)
@@ -178,12 +210,14 @@ Procedure.s ReadRegString(hKeyRoot, KeyPath.s, ValueName.s)
   ProcedureReturn Result
 EndProcedure
 
+; Scans the Windows Registry to populate the list of installed web browsers
 Procedure GetInstalledBrowsers()
   Protected hKey.i, Index.i = 0
   Protected KeyName.s = Space(256), KeyNameSize.i
   Protected SubKeyName.s, BName.s, BPath.s
   ClearList(InstalledBrowsers())
   
+  ; Scan HKLM (System-wide installations)
   If RegOpenKeyEx_(#HKEY_LOCAL_MACHINE, "SOFTWARE\Clients\StartMenuInternet", 0, #KEY_READ, @hKey) = #ERROR_SUCCESS
     Repeat
       KeyNameSize = 256
@@ -209,6 +243,7 @@ Procedure GetInstalledBrowsers()
     RegCloseKey_(hKey)
   EndIf
   
+  ; Scan HKCU (User-specific installations)
   Index = 0
   If RegOpenKeyEx_(#HKEY_CURRENT_USER, "SOFTWARE\Clients\StartMenuInternet", 0, #KEY_READ, @hKey) = #ERROR_SUCCESS
     Repeat
@@ -235,6 +270,7 @@ Procedure GetInstalledBrowsers()
     RegCloseKey_(hKey)
   EndIf
   
+  ; Fallback to system default if no browsers are found
   If ListSize(InstalledBrowsers()) = 0
     AddElement(InstalledBrowsers())
     InstalledBrowsers()\Name = "System Default"
@@ -242,6 +278,7 @@ Procedure GetInstalledBrowsers()
   EndIf
 EndProcedure
 
+; Discovers available language packs (*.lng files) in the application directory
 Procedure GetAvailableLanguages()
   Protected Directory.s = GetPathPart(ProgramFilename())
   Protected DirID.i, FileName.s, LangCode.s
@@ -267,6 +304,7 @@ Procedure GetAvailableLanguages()
     FinishDirectory(DirID)
   EndIf
   
+  ; Fallback language if no packs are found
   If ListSize(AvailableLanguages()) = 0
     AddElement(AvailableLanguages())
     AvailableLanguages()\Code = "DA"
@@ -274,6 +312,7 @@ Procedure GetAvailableLanguages()
   EndIf
 EndProcedure
 
+; Adds an AI service to the internal list (handles both defaults and custom user services)
 Procedure AddAIService(Name.s, URL.s, IsCustom.i)
   Name = Trim(Name)
   URL = NormalizeURL(URL)
@@ -293,6 +332,7 @@ Procedure AddAIService(Name.s, URL.s, IsCustom.i)
   AIServices()\IsCustom = IsCustom
 EndProcedure
 
+; Retrieves the corresponding URL for a given AI service name
 Procedure.s GetAIURLByName(Name.s)
   ForEach AIServices()
     If LCase(AIServices()\Name) = LCase(Name)
@@ -302,6 +342,7 @@ Procedure.s GetAIURLByName(Name.s)
   ProcedureReturn "https://gemini.google.com"
 EndProcedure
 
+; Populates the base list of AI services and loads any user-defined ones from the .ini file
 Procedure LoadAIServices()
   Protected Count.i, I.i, Name.s, URL.s
   ClearList(AIServices())
@@ -326,6 +367,7 @@ Procedure LoadAIServices()
   EndIf
 EndProcedure
 
+; Saves the user-defined custom AI services back to the .ini file
 Procedure SaveCustomAIServices()
   Protected Count.i = 0, I.i = 0
   If OpenPreferences(IniFile, #PB_UTF8) Or CreatePreferences(IniFile, #PB_UTF8)
@@ -347,10 +389,12 @@ Procedure SaveCustomAIServices()
   EndIf
 EndProcedure
 
+; Syncs the active TargetURL string with the current SelectedAI
 Procedure UpdateTargetURL()
   TargetURL = GetAIURLByName(SelectedAI)
 EndProcedure
 
+; UI routine to prompt the user to add or modify a custom AI entry
 Procedure AddOrEditCustomAI()
   Protected Name.s, URL.s
   Name = InputRequester("Custom AI", "Navn på AI-tjenesten:" + Chr(10) + "Eksempel: Open WebUI", "")
@@ -366,6 +410,7 @@ Procedure AddOrEditCustomAI()
   SaveCustomAIServices()
 EndProcedure
 
+; UI routine to safely remove the currently selected custom AI entry
 Procedure RemoveSelectedCustomAI()
   ForEach AIServices()
     If LCase(AIServices()\Name) = LCase(SelectedAI) And AIServices()\IsCustom
@@ -379,6 +424,7 @@ Procedure RemoveSelectedCustomAI()
   MessageRequester("Custom AI", "Den valgte AI er ikke en custom AI og kan derfor ikke fjernes her.", #PB_MessageRequester_Info)
 EndProcedure
 
+; Returns the localized string for a specific LaunchMode ID
 Procedure.s LaunchModeName(Mode.i)
   Select Mode
     Case 0 : ProcedureReturn Txt_LaunchApp
@@ -389,36 +435,64 @@ Procedure.s LaunchModeName(Mode.i)
   ProcedureReturn Txt_LaunchApp
 EndProcedure
 
-; New Embedded WebView2 Window launcher
+; ----------------------------------------------------------------------------
+; CORE LOGIC: WINDOW & BROWSER LAUNCHERS
+; ----------------------------------------------------------------------------
+
+; Opens or updates the native Embedded AI View (WebView2). 
+; Features an Always-On-Top focus workaround and a UI dropdown to switch services.
 Procedure OpenEmbeddedAI(URL.s)
   URL = NormalizeURL(URL)
   If URL = "" : ProcedureReturn : EndIf
   
+  ; If window exists, bring to front and update URL/Dropdown
   If IsWindow(#AIWin)
     SetWindowState(#AIWin, #PB_Window_Normal)
-    StickyWindow(#AIWin, 1)
+    StickyWindow(#AIWin, 1) ; Temporary Always-On-Top to steal OS focus
     SetActiveWindow(#AIWin)
     StickyWindow(#AIWin, 0)
     
     SetGadgetText(#AIGadget, URL)
+    
+    ; Update the ComboBox to reflect the active AI
+    Protected i
+    For i = 0 To CountGadgetItems(#AICombo) - 1
+      If LCase(GetGadgetItemText(#AICombo, i)) = LCase(SelectedAI)
+        SetGadgetState(#AICombo, i)
+        Break
+      EndIf
+    Next
+    
     ProcedureReturn
   EndIf
   
+  ; Initialize the window and layout for the first time
   If OpenWindow(#AIWin, #PB_Ignore, #PB_Ignore, 1024, 768, "AI Copilot View", #PB_Window_SystemMenu | #PB_Window_ScreenCentered | #PB_Window_SizeGadget | #PB_Window_MaximizeGadget)
     
     StickyWindow(#AIWin, 1)
     SetActiveWindow(#AIWin)
     StickyWindow(#AIWin, 0)
     
-    If WebViewGadget(#AIGadget, 0, 0, 1024, 768)
+    ; Top bar dropdown for fast AI switching
+    ComboBoxGadget(#AICombo, 10, 5, 250, 25)
+    ForEach AIServices()
+      AddGadgetItem(#AICombo, -1, AIServices()\Name)
+      If LCase(SelectedAI) = LCase(AIServices()\Name)
+        SetGadgetState(#AICombo, ListIndex(AIServices()))
+      EndIf
+    Next
+    
+    ; Edge WebView2 Gadget integration
+    If WebViewGadget(#AIGadget, 0, 35, 1024, 768 - 35)
       SetGadgetText(#AIGadget, URL) 
-      ResizeGadget(#AIGadget, 0, 0, WindowWidth(#AIWin), WindowHeight(#AIWin))
+      ResizeGadget(#AIGadget, 0, 35, WindowWidth(#AIWin), WindowHeight(#AIWin) - 35)
     EndIf
   EndIf
 EndProcedure
 
+; Main router for launching a target URL. Will either trigger the Embedded View 
+; or hand the execution over to an external web browser depending on user preference.
 Procedure LaunchTarget(URL.s, UseLaunchMode.i)
-  ; Route through embedded handler if preference option flag matches active setting state
   If UseEmbeddedBrowser = 1
     OpenEmbeddedAI(URL)
     ProcedureReturn
@@ -453,11 +527,17 @@ Procedure LaunchTarget(URL.s, UseLaunchMode.i)
   EndSelect
 EndProcedure
 
+; ----------------------------------------------------------------------------
+; LOCALIZATION & SYSTEM TRAY
+; ----------------------------------------------------------------------------
+
+; Reloads all UI string variables from the active language file
 Procedure UpdateLanguageStrings()
   Protected AppName.s = "AI Copilot Mapper"
   Protected VerPrefix.s = " v" + #AppVersion + Chr(10)
   Protected LngFile.s = GetPathPart(ProgramFilename()) + Language + ".lng"
   
+  ; Set hardcoded fallbacks
   Txt_MenuMode = "Knap Funktion" : Txt_ModeAI = "AI Genvej" : Txt_ModeCTRL = "Højre CTRL" : Txt_ModeALT = "Højre ALT"
   Txt_MenuAI = "Vælg AI" : Txt_MenuBrowser = "Vælg Browser" : Txt_MenuAutoStart = "Start med Windows"
   Txt_MenuLanguage = "Sprog" : Txt_MenuExit = "Afslut" : Txt_MenuAbout = "Om programmet"
@@ -473,6 +553,7 @@ Procedure UpdateLanguageStrings()
   Txt_AboutTitle = "Om " + AppName
   Txt_AboutText = AppName + VerPrefix + "Udviklet til at omkode Copilot-tasten til din foretrukne AI, en lokal AI-tjeneste eller en systemtast." + Chr(10) + Chr(10) + "Nyt i 1.2.1:" + Chr(10) + "- Indbygget WebView2 Browser integration"
   
+  ; Attempt to load dynamic definitions from the .lng file
   If FileSize(LngFile) > 0
     If OpenPreferences(LngFile, #PB_UTF8)
       PreferenceGroup("Language")
@@ -509,6 +590,7 @@ Procedure UpdateLanguageStrings()
   Txt_TrayTooltip = AppName
 EndProcedure
 
+; Updates the hover-text of the system tray icon with current status and configuration
 Procedure UpdateTrayTooltip()
   Protected Tip.s
   Tip = "AI Copilot Mapper v" + #AppVersion + Chr(10)
@@ -530,6 +612,7 @@ Procedure UpdateTrayTooltip()
   SysTrayIconToolTip(#TrayIcon, Tip)
 EndProcedure
 
+; Rebuilds the entire System Tray Context Menu dynamically based on active state
 Procedure RebuildMenu()
   Protected Index.i = 0
   If IsMenu(#TrayMenu)
@@ -588,7 +671,7 @@ Procedure RebuildMenu()
     CloseSubMenu()
     
     MenuBar()
-    MenuItem(#Menu_Embedded, Txt_MenuEmbedded) ; New checkbox configuration item
+    MenuItem(#Menu_Embedded, Txt_MenuEmbedded)
     MenuItem(#Menu_AutoStart, Txt_MenuAutoStart)
     MenuItem(#Menu_Pause, Txt_MenuPause)
     
@@ -613,6 +696,7 @@ Procedure RebuildMenu()
     MenuItem(#Menu_About, Txt_MenuAbout)
     MenuItem(#Menu_Exit, Txt_MenuExit)
     
+    ; Apply checkmarks to currently active options
     SetMenuItemState(#TrayMenu, #Menu_Mode_AI, Bool(ButtonMode = 0))
     SetMenuItemState(#TrayMenu, #Menu_Mode_CTRL, Bool(ButtonMode = 1))
     SetMenuItemState(#TrayMenu, #Menu_Mode_ALT, Bool(ButtonMode = 2))
@@ -620,7 +704,7 @@ Procedure RebuildMenu()
     SetMenuItemState(#TrayMenu, #Menu_Launch_Tab, Bool(LaunchMode = 1))
     SetMenuItemState(#TrayMenu, #Menu_Launch_Window, Bool(LaunchMode = 2))
     SetMenuItemState(#TrayMenu, #Menu_Launch_Default, Bool(LaunchMode = 3))
-    SetMenuItemState(#TrayMenu, #Menu_Embedded, UseEmbeddedBrowser) ; Persists active checked state
+    SetMenuItemState(#TrayMenu, #Menu_Embedded, UseEmbeddedBrowser) 
     SetMenuItemState(#TrayMenu, #Menu_AutoStart, AutoStart)
     SetMenuItemState(#TrayMenu, #Menu_Pause, MappingPaused)
   EndIf
@@ -628,6 +712,11 @@ Procedure RebuildMenu()
   UpdateTrayTooltip()
 EndProcedure
 
+; ----------------------------------------------------------------------------
+; SETTINGS & PROFILE MANAGEMENT
+; ----------------------------------------------------------------------------
+
+; Toggles the application in the Windows Registry to start on system boot
 Procedure.i SetAutoStartRegistry(Enable.i)
   Protected hKey.i, Result.i
   Protected KeyPath.s = "Software\Microsoft\Windows\CurrentVersion\Run"
@@ -658,6 +747,7 @@ Procedure.i SetAutoStartRegistry(Enable.i)
   ProcedureReturn 1
 EndProcedure
 
+; Saves the current configuration block to the local .ini file
 Procedure SaveSettings()
   If OpenPreferences(IniFile, #PB_UTF8) Or CreatePreferences(IniFile, #PB_UTF8)
     PreferenceGroup("Settings")
@@ -667,11 +757,12 @@ Procedure SaveSettings()
     WritePreferenceString("AI", SelectedAI)
     WritePreferenceInteger("ButtonMode", ButtonMode)
     WritePreferenceInteger("LaunchMode", LaunchMode)
-    WritePreferenceInteger("UseEmbeddedBrowser", UseEmbeddedBrowser) ; Save active choice
+    WritePreferenceInteger("UseEmbeddedBrowser", UseEmbeddedBrowser)
     ClosePreferences()
   EndIf
 EndProcedure
 
+; Loads and validates previous application state from the local .ini file
 Procedure LoadSettings()
   If OpenPreferences(IniFile, #PB_UTF8)
     PreferenceGroup("Settings")
@@ -701,6 +792,7 @@ Procedure LoadSettings()
   UpdateTargetURL() 
 EndProcedure
 
+; Creates an empty template for per-app profiles if the file does not exist
 Procedure CreateProfileTemplate(Overwrite.i)
   Protected File.i
   If FileSize(ProfileFile) >= 0 And Overwrite = 0 : ProcedureReturn : EndIf
@@ -721,6 +813,7 @@ Procedure CreateProfileTemplate(Overwrite.i)
   EndIf
 EndProcedure
 
+; Parses and caches the active per-app custom profile configurations
 Procedure LoadAppProfiles()
   Protected Count.i, I.i
   ClearList(AppProfiles())
@@ -744,11 +837,13 @@ Procedure LoadAppProfiles()
   EndIf
 EndProcedure
 
+; Opens the profile .ini file in Notepad for user editing
 Procedure OpenProfileFile()
   CreateProfileTemplate(0)
   RunProgram("notepad.exe", Chr(34) + ProfileFile + Chr(34), "")
 EndProcedure
 
+; Queries the Windows API to identify the currently active foreground application
 Procedure.s GetActiveProcessName()
   Protected hWnd.i, PID.i, hProcess.i
   Protected Buffer.s = Space(1024), Size.i = 1024
@@ -770,6 +865,7 @@ Procedure.s GetActiveProcessName()
   ProcedureReturn Result
 EndProcedure
 
+; Checks if the currently active application matches any defined user profiles
 Procedure.i FindActiveProfile()
   Protected Proc.s = GetActiveProcessName()
   If Proc = "" : ProcedureReturn 0 : EndIf
@@ -783,7 +879,10 @@ Procedure.i FindActiveProfile()
 EndProcedure
 
 
-; --- 3. KEYBOARD HOOK LOGIC (With SendInput API) ---
+; ----------------------------------------------------------------------------
+; 3. KEYBOARD HOOK LOGIC (With SendInput API)
+; Intercepts global keyboard events to remap the specific vkCode $86 key.
+; ----------------------------------------------------------------------------
 
 Procedure.l KeyboardProc(nCode, wParam, lParam)
   Protected *pkbdll.KBDLLHOOKSTRUCT = lParam
@@ -791,20 +890,22 @@ Procedure.l KeyboardProc(nCode, wParam, lParam)
   Protected EffURL.s
   Protected VKey.w
   
+  ; Pass through events if code < 0 or if the event was injected by software
   If nCode < 0
     ProcedureReturn CallNextHookEx_(hHook, nCode, wParam, lParam)
   EndIf
-
   If *pkbdll\flags & $10
     ProcedureReturn CallNextHookEx_(hHook, nCode, wParam, lParam)
   EndIf
 
+  ; $86 corresponds to the modern AI Copilot hardware key
   If *pkbdll\vkCode = $86 
     EffMode = ButtonMode
     EffLaunchMode = LaunchMode
     EffPaused = MappingPaused
     EffURL = TargetURL
     
+    ; Apply profile overrides if the foreground application matches a known rule
     If FindActiveProfile()
       If AppProfiles()\Paused = 1
         EffPaused = 1
@@ -832,20 +933,24 @@ Procedure.l KeyboardProc(nCode, wParam, lParam)
       ProcedureReturn CallNextHookEx_(hHook, nCode, wParam, lParam)
     EndIf
     
+    ; Handle the initial key press
     If wParam = #WM_KEYDOWN Or wParam = #WM_SYSKEYDOWN
       If CopilotKeyDown = 0
         CopilotKeyDown = 1
         
         Select EffMode
           Case 0 
+            ; AI Mode: Queue the event for the main thread to handle safely
             PendingLaunchURL = EffURL
             PendingLaunchMode = EffLaunchMode
             PostEvent(#Event_OpenCopilot)
             
           Case 1, 2 
+            ; Remap Mode: Emulate a CTRL or ALT keydown event instead
             If EffMode = 1 : VKey = #VK_RCONTROL : Else : VKey = #VK_RMENU : EndIf
             ActiveRemapVKey = VKey
             
+            ; Release modifier keys to prevent conflicting input states
             If GetAsyncKeyState_(#VK_LSHIFT) & $8000
               SendKeyInput(#VK_LSHIFT, #KEYEVENTF_KEYUP)
             EndIf
@@ -858,6 +963,7 @@ Procedure.l KeyboardProc(nCode, wParam, lParam)
       EndIf
       ProcedureReturn 1
       
+    ; Handle key release and clean up emulated strokes
     ElseIf wParam = #WM_KEYUP Or wParam = #WM_SYSKEYUP
       If ActiveRemapVKey <> 0
         SendKeyInput(ActiveRemapVKey, #KEYEVENTF_KEYUP)
@@ -873,8 +979,14 @@ Procedure.l KeyboardProc(nCode, wParam, lParam)
 EndProcedure
 
 
-; --- 4. APPLICATION INITIALIZATION ---
+; ----------------------------------------------------------------------------
+; 4. APPLICATION INITIALIZATION & MAIN LOOP
+; ----------------------------------------------------------------------------
+
+; Configure WebView2 to isolate user data (cookies/logins) in a local folder
 SetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", GetPathPart(ProgramFilename()) + "WebViewData")
+
+; Bootstrap startup resources
 GetAvailableLanguages() 
 LoadAIServices()
 GetInstalledBrowsers()
@@ -882,6 +994,7 @@ LoadSettings()
 LoadAppProfiles()
 UpdateLanguageStrings()
 
+; Initialize hidden background window for the System Tray handler
 If OpenWindow(#MainWin, 0, 0, 0, 0, "AICopilotMapper", #PB_Window_Invisible)
   
   CatchImage(#AppIcon, ?AppIconStart, ?AppIconEnd - ?AppIconStart)
@@ -889,38 +1002,55 @@ If OpenWindow(#MainWin, 0, 0, 0, 0, "AICopilotMapper", #PB_Window_Invisible)
   SysTrayIconToolTip(#TrayIcon, Txt_TrayTooltip)
   RebuildMenu()
   
+  ; Register the global Low-Level Keyboard hook
   hHook = SetWindowsHookEx_(13, @KeyboardProc(), GetModuleHandle_(0), 0)
   If hHook = 0
     MessageRequester("Keyboard hook fejl", "Kunne ikke installere keyboard hook.", #PB_MessageRequester_Error)
   EndIf
   
-  ; Main Event Loop
+  ; Core UI Event Loop
   Repeat
     Define Event.i = WaitWindowEvent()
     
-    ; Capture dynamic resizing for embedded layout window bounds
+    ; Dynamic layout handling: scale the embedded browser when window resizes
     If Event = #PB_Event_SizeWindow And EventWindow() = #AIWin
-      ResizeGadget(#AIGadget, 0, 0, WindowWidth(#AIWin), WindowHeight(#AIWin))
+      ResizeGadget(#AIGadget, 0, 35, WindowWidth(#AIWin), WindowHeight(#AIWin) - 35)
     EndIf
     
     Select Event      
+      ; Execute the queued launch request dispatched from the keyboard hook
       Case #Event_OpenCopilot
         LaunchTarget(PendingLaunchURL, PendingLaunchMode)
         
+      ; Handle native UI interactions (Dropdown menu changes)
+      Case #PB_Event_Gadget
+        If EventGadget() = #AICombo
+          Define SelectedIdx.i = GetGadgetState(#AICombo)
+          If SelectedIdx >= 0
+            SelectElement(AIServices(), SelectedIdx)
+            SelectedAI = AIServices()\Name
+            UpdateTargetURL()
+            SetGadgetText(#AIGadget, TargetURL)
+            SaveSettings()
+            RebuildMenu()
+          EndIf
+        EndIf
+        
       Case #PB_Event_CloseWindow
-        ; If the user hits Close on the AI Window frame, close just the view window
+        ; Safely close the Embedded AI Window without terminating the background app
         If EventWindow() = #AIWin
           CloseWindow(#AIWin)
         Else
-          ; If it somehow hits main, break loop
           Break
         EndIf
 
+      ; Show context menu on system tray click
       Case #PB_Event_SysTray
         If EventType() = #PB_EventType_RightClick Or EventType() = #PB_EventType_LeftClick
           DisplayPopupMenu(#TrayMenu, WindowID(#MainWin))
         EndIf
         
+      ; Handle system tray menu selections and update internal state
       Case #PB_Event_Menu
         Define MenuID.i = EventMenu()
         
@@ -990,9 +1120,12 @@ If OpenWindow(#MainWin, 0, 0, 0, 0, "AICopilotMapper", #PB_Window_Invisible)
           EndSelect
         EndIf
     EndSelect
-  ForEver ; Kept alive dynamically unless standard break exit event triggers
+  ForEver ; Keep application alive dynamically unless explicitly closed
 
-  ; Cleanup before exit
+  ; --------------------------------------------------------------------------
+  ; 5. GRACEFUL CLEANUP 
+  ; Remove hooks, release handles and unregister tray icons before termination
+  ; --------------------------------------------------------------------------
   If IsWindow(#AIWin) : CloseWindow(#AIWin) : EndIf
   If ActiveRemapVKey <> 0 : SendKeyInput(ActiveRemapVKey, #KEYEVENTF_KEYUP) : EndIf
   If hHook : UnhookWindowsHookEx_(hHook) : EndIf
@@ -1006,8 +1139,15 @@ DataSection
   AppIconEnd:
 EndDataSection
 ; IDE Options = PureBasic 6.40 (Windows - x64)
-; CursorPosition = 418
-; FirstLine = 389
+; CursorPosition = 10
+; Folding = -----
+; EnableXP
+; DPIAware
+; UseIcon = aicopilotmapper.ico
+; Executable = ..\AICopilotMapper.exe
+; IDE Options = PureBasic 6.40 (Windows - x64)
+; CursorPosition = 1138
+; FirstLine = 1100
 ; Folding = -----
 ; EnableXP
 ; DPIAware
