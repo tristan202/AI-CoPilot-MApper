@@ -85,6 +85,20 @@ Global CopilotKeyDown.i = 0
 Global ActiveRemapVKey.w = 0 
 Global hMutex, hHook
 
+; Cached per-app profile state.
+; IMPORTANT: This cache is refreshed periodically by a window timer (see main loop),
+; NOT queried live from inside the keyboard hook. Low-level keyboard hooks (WH_KEYBOARD_LL)
+; must return within a short OS timeout (LowLevelHooksTimeout, ~300ms by default) or
+; Windows silently unhooks them. Doing registry/process lookups on every keypress risked
+; exactly that, so the hook now only ever reads these plain globals.
+Global CachedProfileActive.i = 0
+Global CachedProfileMode.i = -1
+Global CachedProfileLaunchMode.i = -1
+Global CachedProfileAIURL.s = ""
+Global CachedProfilePaused.i = -1
+#ProfileCacheTimerID = 1
+#ProfileCacheIntervalMs = 250
+
 ; String Variables for UI (Populated by Language Files)
 Global Txt_MsgBoxTitle.s, Txt_MsgBoxRunning.s
 Global Txt_TrayTooltip.s, Txt_MenuBrowser.s, Txt_MenuAI.s
@@ -95,6 +109,11 @@ Global Txt_MenuLaunchMode.s, Txt_LaunchApp.s, Txt_LaunchTab.s, Txt_LaunchWindow.
 Global Txt_MenuPause.s, Txt_MenuProfiles.s, Txt_ProfileOpen.s, Txt_ProfileReload.s, Txt_ProfileTemplate.s
 Global Txt_CustomAIAdd.s, Txt_CustomAIRemove.s
 Global Txt_MenuEmbedded.s 
+; Previously hardcoded Danish strings, now localizable like everything else:
+Global Txt_CustomAINamePrompt.s, Txt_CustomAIURLPrompt.s
+Global Txt_CustomAINotCustomTitle.s, Txt_CustomAINotCustomMsg.s
+Global Txt_RegErrorTitle.s, Txt_RegErrorMsg.s
+Global Txt_ProfileReloadedTitle.s, Txt_ProfileReloadedMsg.s
 
 ; ----------------------------------------------------------------------------
 ; ENUMERATIONS (IDs for Events, Windows, Gadgets, and Menus)
@@ -133,9 +152,11 @@ Enumeration
   #Menu_Profile_Template
   #Menu_About
   #Menu_Exit
-  #Menu_Browser_Base = 100 
-  #Menu_Lang_Base    = 200 
-  #Menu_AI_Base      = 300 
+  ; Bumped from 100/200/300 to give each dynamic list far more headroom
+  ; before it could ever collide with the next range.
+  #Menu_Browser_Base = 1000 
+  #Menu_Lang_Base    = 2000 
+  #Menu_AI_Base      = 3000 
 EndEnumeration
 
 ; ----------------------------------------------------------------------------
@@ -144,7 +165,12 @@ EndEnumeration
 ; ----------------------------------------------------------------------------
 Global MutexName.s = "Global\AICopilotMapper_Unique_ID"
 hMutex = CreateMutex_(0, 1, @MutexName)
-If GetLastError_() = 183 : End : EndIf
+If GetLastError_() = 183
+  ; Language strings aren't loaded yet at this point in startup, so this uses a
+  ; plain bilingual fallback rather than silently exiting with no feedback.
+  MessageRequester("AI Copilot Mapper", "Programmet kører allerede (se system tray)." + Chr(10) + "The application is already running (check the system tray).", #PB_MessageRequester_Info)
+  End
+EndIf
 
 
 ; ----------------------------------------------------------------------------
@@ -160,16 +186,35 @@ Procedure.i StartsWithProtocol(Text.s)
   ProcedureReturn 0
 EndProcedure
 
-; Normalizes the URL, appending http/https if missing depending on the address
+; Restricts accepted schemes to http/https only. Custom AI URLs and per-app
+; profile URLs are user/ini supplied and get fed straight into RunProgram()
+; and the WebView, so schemes like file:// or javascript: are rejected here.
+Procedure.i IsAllowedScheme(URL.s)
+  Protected L.s = LCase(URL)
+  If Left(L, 7) = "http://" Or Left(L, 8) = "https://"
+    ProcedureReturn 1
+  EndIf
+  ProcedureReturn 0
+EndProcedure
+
+; Normalizes the URL, appending http/https if missing depending on the address.
+; Returns "" if the URL uses a disallowed (non-http/https) scheme.
 Procedure.s NormalizeURL(URL.s)
   URL = Trim(URL)
-  If URL <> "" And StartsWithProtocol(URL) = 0
+  If URL = "" : ProcedureReturn "" : EndIf
+  
+  If StartsWithProtocol(URL) = 0
     If Left(LCase(URL), 9) = "localhost" Or Left(URL, 9) = "127.0.0.1" Or Left(URL, 5) = "[::1]"
       URL = "http://" + URL
     Else
       URL = "https://" + URL
     EndIf
   EndIf
+  
+  If IsAllowedScheme(URL) = 0
+    ProcedureReturn ""
+  EndIf
+  
   ProcedureReturn URL
 EndProcedure
 
@@ -193,82 +238,74 @@ Procedure SendKeyInput(VKey.w, Flags.l)
   SendInput_(1, @Input, SizeOf(INPUT))
 EndProcedure
 
-; Helper function to safely read string values from the Windows Registry
+; Helper function to safely read string values from the Windows Registry.
+; Queries the required buffer size first instead of assuming a fixed 1024-byte
+; buffer is always large enough (avoids silent truncation on long values).
 Procedure.s ReadRegString(hKeyRoot, KeyPath.s, ValueName.s)
-  Protected hKey.i, Type.i, BufferSize.i = 1024
-  Protected *Buffer = AllocateMemory(BufferSize)
-  Protected Result.s = ""
+  Protected hKey.i, Type.i, BufferSize.i, Result.s = ""
+  Protected *Buffer
+  Protected QueryResult.i
+  
   If RegOpenKeyEx_(hKeyRoot, KeyPath, 0, #KEY_READ, @hKey) = #ERROR_SUCCESS
-    If RegQueryValueEx_(hKey, ValueName, 0, @Type, *Buffer, @BufferSize) = #ERROR_SUCCESS
-      If Type = #REG_SZ Or Type = #REG_EXPAND_SZ
-        Result = PeekS(*Buffer)
+    BufferSize = 0
+    QueryResult = RegQueryValueEx_(hKey, ValueName, 0, @Type, 0, @BufferSize)
+    If (QueryResult = #ERROR_SUCCESS Or QueryResult = 234) And BufferSize > 0 ; 234 = ERROR_MORE_DATA
+      *Buffer = AllocateMemory(BufferSize + SizeOf(Character))
+      If *Buffer
+        If RegQueryValueEx_(hKey, ValueName, 0, @Type, *Buffer, @BufferSize) = #ERROR_SUCCESS
+          If Type = #REG_SZ Or Type = #REG_EXPAND_SZ
+            Result = PeekS(*Buffer, BufferSize / SizeOf(Character))
+          EndIf
+        EndIf
+        FreeMemory(*Buffer)
       EndIf
     EndIf
     RegCloseKey_(hKey)
   EndIf
-  FreeMemory(*Buffer)
+  
   ProcedureReturn Result
+EndProcedure
+
+; Scans a single registry root (HKLM or HKCU) for installed browsers and
+; appends matches to the InstalledBrowsers() list. Shared by GetInstalledBrowsers()
+; to avoid duplicating the HKLM/HKCU scanning logic.
+Procedure ScanBrowserRegistryKey(hKeyRoot.i)
+  Protected hKey.i, Index.i = 0
+  Protected KeyName.s = Space(256), KeyNameSize.i
+  Protected SubKeyName.s, BName.s, BPath.s
+  
+  If RegOpenKeyEx_(hKeyRoot, "SOFTWARE\Clients\StartMenuInternet", 0, #KEY_READ, @hKey) = #ERROR_SUCCESS
+    Repeat
+      KeyNameSize = 256
+      If RegEnumKeyEx_(hKey, Index, @KeyName, @KeyNameSize, 0, 0, 0, 0) = #ERROR_SUCCESS
+        SubKeyName = "SOFTWARE\Clients\StartMenuInternet\" + Left(KeyName, KeyNameSize)
+        BName = ReadRegString(hKeyRoot, SubKeyName, "")
+        If BName = "" : BName = Left(KeyName, KeyNameSize) : EndIf
+        BPath = ReadRegString(hKeyRoot, SubKeyName + "\shell\open\command", "")
+        If FindString(LCase(BPath), ".exe")
+          BPath = Left(BPath, FindString(LCase(BPath), ".exe") + 3)
+          BPath = RemoveString(BPath, #DQUOTE$)
+        EndIf
+        If BName <> "" And BPath <> ""
+          AddElement(InstalledBrowsers())
+          InstalledBrowsers()\Name = BName
+          InstalledBrowsers()\Path = BPath
+        EndIf
+        Index + 1
+      Else
+        Break
+      EndIf
+    ForEver
+    RegCloseKey_(hKey)
+  EndIf
 EndProcedure
 
 ; Scans the Windows Registry to populate the list of installed web browsers
 Procedure GetInstalledBrowsers()
-  Protected hKey.i, Index.i = 0
-  Protected KeyName.s = Space(256), KeyNameSize.i
-  Protected SubKeyName.s, BName.s, BPath.s
   ClearList(InstalledBrowsers())
   
-  ; Scan HKLM (System-wide installations)
-  If RegOpenKeyEx_(#HKEY_LOCAL_MACHINE, "SOFTWARE\Clients\StartMenuInternet", 0, #KEY_READ, @hKey) = #ERROR_SUCCESS
-    Repeat
-      KeyNameSize = 256
-      If RegEnumKeyEx_(hKey, Index, @KeyName, @KeyNameSize, 0, 0, 0, 0) = #ERROR_SUCCESS
-        SubKeyName = "SOFTWARE\Clients\StartMenuInternet\" + Left(KeyName, KeyNameSize)
-        BName = ReadRegString(#HKEY_LOCAL_MACHINE, SubKeyName, "")
-        If BName = "" : BName = Left(KeyName, KeyNameSize) : EndIf
-        BPath = ReadRegString(#HKEY_LOCAL_MACHINE, SubKeyName + "\shell\open\command", "")
-        If FindString(LCase(BPath), ".exe")
-          BPath = Left(BPath, FindString(LCase(BPath), ".exe") + 3)
-          BPath = RemoveString(BPath, #DQUOTE$)
-        EndIf
-        If BName <> "" And BPath <> ""
-          AddElement(InstalledBrowsers())
-          InstalledBrowsers()\Name = BName
-          InstalledBrowsers()\Path = BPath
-        EndIf
-        Index + 1
-      Else
-        Break
-      EndIf
-    ForEver
-    RegCloseKey_(hKey)
-  EndIf
-  
-  ; Scan HKCU (User-specific installations)
-  Index = 0
-  If RegOpenKeyEx_(#HKEY_CURRENT_USER, "SOFTWARE\Clients\StartMenuInternet", 0, #KEY_READ, @hKey) = #ERROR_SUCCESS
-    Repeat
-      KeyNameSize = 256
-      If RegEnumKeyEx_(hKey, Index, @KeyName, @KeyNameSize, 0, 0, 0, 0) = #ERROR_SUCCESS
-        SubKeyName = "SOFTWARE\Clients\StartMenuInternet\" + Left(KeyName, KeyNameSize)
-        BName = ReadRegString(#HKEY_CURRENT_USER, SubKeyName, "")
-        If BName = "" : BName = Left(KeyName, KeyNameSize) : EndIf
-        BPath = ReadRegString(#HKEY_CURRENT_USER, SubKeyName + "\shell\open\command", "")
-        If FindString(LCase(BPath), ".exe")
-          BPath = Left(BPath, FindString(LCase(BPath), ".exe") + 3)
-          BPath = RemoveString(BPath, #DQUOTE$)
-        EndIf
-        If BName <> "" And BPath <> ""
-          AddElement(InstalledBrowsers())
-          InstalledBrowsers()\Name = BName
-          InstalledBrowsers()\Path = BPath
-        EndIf
-        Index + 1
-      Else
-        Break
-      EndIf
-    ForEver
-    RegCloseKey_(hKey)
-  EndIf
+  ScanBrowserRegistryKey(#HKEY_LOCAL_MACHINE) ; System-wide installations
+  ScanBrowserRegistryKey(#HKEY_CURRENT_USER)  ; User-specific installations
   
   ; Fallback to system default if no browsers are found
   If ListSize(InstalledBrowsers()) = 0
@@ -397,10 +434,10 @@ EndProcedure
 ; UI routine to prompt the user to add or modify a custom AI entry
 Procedure AddOrEditCustomAI()
   Protected Name.s, URL.s
-  Name = InputRequester("Custom AI", "Navn på AI-tjenesten:" + Chr(10) + "Eksempel: Open WebUI", "")
+  Name = InputRequester("Custom AI", Txt_CustomAINamePrompt, "")
   If Trim(Name) = "" : ProcedureReturn : EndIf
   
-  URL = InputRequester("Custom AI", "URL til AI-tjenesten:" + Chr(10) + "Eksempel: http://localhost:3000", "http://localhost:3000")
+  URL = InputRequester("Custom AI", Txt_CustomAIURLPrompt, "http://localhost:3000")
   URL = NormalizeURL(URL)
   If Trim(URL) = "" : ProcedureReturn : EndIf
   
@@ -421,7 +458,7 @@ Procedure RemoveSelectedCustomAI()
       ProcedureReturn
     EndIf
   Next
-  MessageRequester("Custom AI", "Den valgte AI er ikke en custom AI og kan derfor ikke fjernes her.", #PB_MessageRequester_Info)
+  MessageRequester(Txt_CustomAINotCustomTitle, Txt_CustomAINotCustomMsg, #PB_MessageRequester_Info)
 EndProcedure
 
 ; Returns the localized string for a specific LaunchMode ID
@@ -439,6 +476,24 @@ EndProcedure
 ; CORE LOGIC: WINDOW & BROWSER LAUNCHERS
 ; ----------------------------------------------------------------------------
 
+; Clears and repopulates the AI dropdown from AIServices(), selecting SelectedAI.
+; Shared by both the "first open" and "reuse existing window" paths in
+; OpenEmbeddedAI() so a custom AI added while the window is open shows up
+; in the dropdown immediately, instead of only on the next fresh launch.
+Procedure PopulateAICombo()
+  Protected i.i
+  ClearGadgetItems(#AICombo)
+  ForEach AIServices()
+    AddGadgetItem(#AICombo, -1, AIServices()\Name)
+  Next
+  For i = 0 To CountGadgetItems(#AICombo) - 1
+    If LCase(GetGadgetItemText(#AICombo, i)) = LCase(SelectedAI)
+      SetGadgetState(#AICombo, i)
+      Break
+    EndIf
+  Next
+EndProcedure
+
 ; Opens or updates the native Embedded AI View (WebView2). 
 ; Features an Always-On-Top focus workaround and a UI dropdown to switch services.
 Procedure OpenEmbeddedAI(URL.s)
@@ -453,15 +508,7 @@ Procedure OpenEmbeddedAI(URL.s)
     StickyWindow(#AIWin, 0)
     
     SetGadgetText(#AIGadget, URL)
-    
-    ; Update the ComboBox to reflect the active AI
-    Protected i
-    For i = 0 To CountGadgetItems(#AICombo) - 1
-      If LCase(GetGadgetItemText(#AICombo, i)) = LCase(SelectedAI)
-        SetGadgetState(#AICombo, i)
-        Break
-      EndIf
-    Next
+    PopulateAICombo()
     
     ProcedureReturn
   EndIf
@@ -475,12 +522,7 @@ Procedure OpenEmbeddedAI(URL.s)
     
     ; Top bar dropdown for fast AI switching
     ComboBoxGadget(#AICombo, 10, 5, 250, 25)
-    ForEach AIServices()
-      AddGadgetItem(#AICombo, -1, AIServices()\Name)
-      If LCase(SelectedAI) = LCase(AIServices()\Name)
-        SetGadgetState(#AICombo, ListIndex(AIServices()))
-      EndIf
-    Next
+    PopulateAICombo()
     
     ; Edge WebView2 Gadget integration
     If WebViewGadget(#AIGadget, 0, 35, 1024, 768 - 35)
@@ -552,6 +594,15 @@ Procedure UpdateLanguageStrings()
   Txt_MenuEmbedded = "Brug Indbygget View (Hurtig)"
   Txt_AboutTitle = "Om " + AppName
   Txt_AboutText = AppName + VerPrefix + "Udviklet til at omkode Copilot-tasten til din foretrukne AI, en lokal AI-tjeneste eller en systemtast." + Chr(10) + Chr(10) + "Nyt i 1.2.1:" + Chr(10) + "- Indbygget WebView2 Browser integration"
+  Txt_MsgBoxRunning = "Programmet kører allerede."
+  Txt_CustomAINamePrompt = "Navn på AI-tjenesten:" + Chr(10) + "Eksempel: Open WebUI"
+  Txt_CustomAIURLPrompt = "URL til AI-tjenesten:" + Chr(10) + "Eksempel: http://localhost:3000"
+  Txt_CustomAINotCustomTitle = "Custom AI"
+  Txt_CustomAINotCustomMsg = "Den valgte AI er ikke en custom AI og kan derfor ikke fjernes her."
+  Txt_RegErrorTitle = "Rettighedsfejl"
+  Txt_RegErrorMsg = "Windows nægtede adgang til Autostart."
+  Txt_ProfileReloadedTitle = "Profiler"
+  Txt_ProfileReloadedMsg = "Profiler er genindlæst."
   
   ; Attempt to load dynamic definitions from the .lng file
   If FileSize(LngFile) > 0
@@ -582,6 +633,15 @@ Procedure UpdateLanguageStrings()
       Txt_MenuEmbedded = ReadPreferenceString("MenuEmbedded", Txt_MenuEmbedded)
       Txt_AboutTitle = ReadPreferenceString("AboutTitle", Txt_AboutTitle)
       Txt_AboutText = AppName + VerPrefix + ReadPreferenceString("AboutText", "Developed to remap the Copilot key.")
+      Txt_MsgBoxRunning = ReadPreferenceString("MsgBoxRunning", Txt_MsgBoxRunning)
+      Txt_CustomAINamePrompt = ReadPreferenceString("CustomAINamePrompt", Txt_CustomAINamePrompt)
+      Txt_CustomAIURLPrompt = ReadPreferenceString("CustomAIURLPrompt", Txt_CustomAIURLPrompt)
+      Txt_CustomAINotCustomTitle = ReadPreferenceString("CustomAINotCustomTitle", Txt_CustomAINotCustomTitle)
+      Txt_CustomAINotCustomMsg = ReadPreferenceString("CustomAINotCustomMsg", Txt_CustomAINotCustomMsg)
+      Txt_RegErrorTitle = ReadPreferenceString("RegErrorTitle", Txt_RegErrorTitle)
+      Txt_RegErrorMsg = ReadPreferenceString("RegErrorMsg", Txt_RegErrorMsg)
+      Txt_ProfileReloadedTitle = ReadPreferenceString("ProfileReloadedTitle", Txt_ProfileReloadedTitle)
+      Txt_ProfileReloadedMsg = ReadPreferenceString("ProfileReloadedMsg", Txt_ProfileReloadedMsg)
       ClosePreferences()
     EndIf
   EndIf
@@ -740,7 +800,7 @@ Procedure.i SetAutoStartRegistry(Enable.i)
   EndIf
   
   If Result <> #ERROR_SUCCESS
-    MessageRequester("Rettighedsfejl", "Windows nægtede adgang til Autostart." + Chr(10) + "Fejlkode: " + Str(Result), #PB_MessageRequester_Warning)
+    MessageRequester(Txt_RegErrorTitle, Txt_RegErrorMsg + Chr(10) + "Fejlkode: " + Str(Result), #PB_MessageRequester_Warning)
     ProcedureReturn 0
   EndIf
   
@@ -865,17 +925,35 @@ Procedure.s GetActiveProcessName()
   ProcedureReturn Result
 EndProcedure
 
-; Checks if the currently active application matches any defined user profiles
-Procedure.i FindActiveProfile()
+; Refreshes the cached "effective profile" state used by KeyboardProc().
+; Called periodically by a window timer (and on demand after profile edits),
+; so the actual registry/process lookups never happen inside the low-level
+; keyboard hook itself. See the CachedProfile* globals for details.
+Procedure UpdateActiveProfileCache()
   Protected Proc.s = GetActiveProcessName()
-  If Proc = "" : ProcedureReturn 0 : EndIf
+  
+  CachedProfileActive = 0
+  CachedProfileMode = -1
+  CachedProfileLaunchMode = -1
+  CachedProfileAIURL = ""
+  CachedProfilePaused = -1
+  
+  If Proc = "" : ProcedureReturn : EndIf
   
   ForEach AppProfiles()
     If LCase(AppProfiles()\Process) = Proc
-      ProcedureReturn 1
+      CachedProfileActive = 1
+      CachedProfileMode = AppProfiles()\Mode
+      CachedProfileLaunchMode = AppProfiles()\LaunchMode
+      CachedProfilePaused = AppProfiles()\Paused
+      If AppProfiles()\AIURL <> ""
+        CachedProfileAIURL = AppProfiles()\AIURL
+      ElseIf AppProfiles()\AIName <> ""
+        CachedProfileAIURL = GetAIURLByName(AppProfiles()\AIName)
+      EndIf
+      Break
     EndIf
   Next
-  ProcedureReturn 0
 EndProcedure
 
 
@@ -905,26 +983,25 @@ Procedure.l KeyboardProc(nCode, wParam, lParam)
     EffPaused = MappingPaused
     EffURL = TargetURL
     
-    ; Apply profile overrides if the foreground application matches a known rule
-    If FindActiveProfile()
-      If AppProfiles()\Paused = 1
+    ; Apply profile overrides from the periodically-refreshed cache. No registry
+    ; or process API calls happen here — see UpdateActiveProfileCache().
+    If CachedProfileActive
+      If CachedProfilePaused = 1
         EffPaused = 1
-      ElseIf AppProfiles()\Paused = 0 And MappingPaused = 0
+      ElseIf CachedProfilePaused = 0 And MappingPaused = 0
         EffPaused = 0
       EndIf
       
-      If AppProfiles()\Mode >= 0 And AppProfiles()\Mode <= 2
-        EffMode = AppProfiles()\Mode
+      If CachedProfileMode >= 0 And CachedProfileMode <= 2
+        EffMode = CachedProfileMode
       EndIf
       
-      If AppProfiles()\LaunchMode >= 0 And AppProfiles()\LaunchMode <= 3
-        EffLaunchMode = AppProfiles()\LaunchMode
+      If CachedProfileLaunchMode >= 0 And CachedProfileLaunchMode <= 3
+        EffLaunchMode = CachedProfileLaunchMode
       EndIf
       
-      If AppProfiles()\AIURL <> ""
-        EffURL = AppProfiles()\AIURL
-      ElseIf AppProfiles()\AIName <> ""
-        EffURL = GetAIURLByName(AppProfiles()\AIName)
+      If CachedProfileAIURL <> ""
+        EffURL = CachedProfileAIURL
       EndIf
     EndIf
     
@@ -993,6 +1070,7 @@ GetInstalledBrowsers()
 LoadSettings()
 LoadAppProfiles()
 UpdateLanguageStrings()
+UpdateActiveProfileCache() ; Prime the cache so the very first keypress isn't stale
 
 ; Initialize hidden background window for the System Tray handler
 If OpenWindow(#MainWin, 0, 0, 0, 0, "AICopilotMapper", #PB_Window_Invisible)
@@ -1007,6 +1085,10 @@ If OpenWindow(#MainWin, 0, 0, 0, 0, "AICopilotMapper", #PB_Window_Invisible)
   If hHook = 0
     MessageRequester("Keyboard hook fejl", "Kunne ikke installere keyboard hook.", #PB_MessageRequester_Error)
   EndIf
+  
+  ; Periodic timer that refreshes the active-profile cache so KeyboardProc()
+  ; never has to touch the registry/process APIs directly.
+  AddWindowTimer(#MainWin, #ProfileCacheTimerID, #ProfileCacheIntervalMs)
   
   ; Core UI Event Loop
   Repeat
@@ -1048,6 +1130,12 @@ If OpenWindow(#MainWin, 0, 0, 0, 0, "AICopilotMapper", #PB_Window_Invisible)
       Case #PB_Event_SysTray
         If EventType() = #PB_EventType_RightClick Or EventType() = #PB_EventType_LeftClick
           DisplayPopupMenu(#TrayMenu, WindowID(#MainWin))
+        EndIf
+        
+      ; Refresh the cached active-profile state on a timer, not inside the hook
+      Case #PB_Event_Timer
+        If EventTimer() = #ProfileCacheTimerID And EventWindow() = #MainWin
+          UpdateActiveProfileCache()
         EndIf
         
       ; Handle system tray menu selections and update internal state
@@ -1111,7 +1199,8 @@ If OpenWindow(#MainWin, 0, 0, 0, 0, "AICopilotMapper", #PB_Window_Invisible)
             Case #Menu_Profile_Open     : OpenProfileFile()
             Case #Menu_Profile_Reload
               LoadAppProfiles()
-              MessageRequester("Profiler", "Profiler er genindlæst.", #PB_MessageRequester_Info)
+              UpdateActiveProfileCache()
+              MessageRequester(Txt_ProfileReloadedTitle, Txt_ProfileReloadedMsg, #PB_MessageRequester_Info)
               RebuildMenu()
               
             Case #Menu_Profile_Template : CreateProfileTemplate(1) : OpenProfileFile()
@@ -1126,6 +1215,7 @@ If OpenWindow(#MainWin, 0, 0, 0, 0, "AICopilotMapper", #PB_Window_Invisible)
   ; 5. GRACEFUL CLEANUP 
   ; Remove hooks, release handles and unregister tray icons before termination
   ; --------------------------------------------------------------------------
+  RemoveWindowTimer(#MainWin, #ProfileCacheTimerID)
   If IsWindow(#AIWin) : CloseWindow(#AIWin) : EndIf
   If ActiveRemapVKey <> 0 : SendKeyInput(ActiveRemapVKey, #KEYEVENTF_KEYUP) : EndIf
   If hHook : UnhookWindowsHookEx_(hHook) : EndIf
@@ -1146,9 +1236,9 @@ EndDataSection
 ; UseIcon = aicopilotmapper.ico
 ; Executable = ..\AICopilotMapper.exe
 ; IDE Options = PureBasic 6.40 (Windows - x64)
-; CursorPosition = 1138
-; FirstLine = 1100
-; Folding = -----
+; CursorPosition = 1212
+; FirstLine = 1189
+; Folding = ------
 ; EnableXP
 ; DPIAware
 ; UseIcon = aicopilotmapper.ico
